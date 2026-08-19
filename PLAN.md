@@ -178,11 +178,20 @@ Docker Compose на VPS.
 
 ### Фаза 3 — Parser MVP (`parser/`)
 
-- [ ] `fetcher.py`: httpx+tenacity, ретраи (3 попытки → пропуск источника до следующего
-      цикла), таймауты, `apparent_encoding`-автоопределение кодировки, схема
-      прямой-запрос/через-`RU_PROXY_URL` по источнику из справочника.
-- [ ] Адаптер `sources/sfr.py`, `sources/mintrud.py` — подтверждённые федеральные
-      листинги (`docs/STAGE0.md`, раздел 2).
+- [x] `fetcher.py`: httpx+tenacity, ретраи (3 попытки → `SourceUnavailable`), таймауты,
+      автоопределение кодировки (`charset_normalizer`), схема прямой-запрос/через-
+      `RU_PROXY_URL` по `access` из справочника (`db/catalog.py::Source`). Браузероподобный
+      User-Agent — mintrud.gov.ru отдаёт 403 на идентифицирующий UA (см. docs/STAGE0.md).
+      5 тестов (`tests/test_fetcher.py`, без реальной сети — `httpx.MockTransport`).
+- [x] Адаптер `sources/sfr.py` (`fetch_news`), `sources/mintrud.py` (`fetch_docs`) —
+      реализованы и протестированы на реальной вёрстке, снятой вживую 2026-08-19 (не на
+      придуманной разметке). **Уточнение к `docs/STAGE0.md`:** раздел нормативных актов
+      sfr.gov.ru (`/about/prf_order/` → `/order/`) на практике оказался категорийным
+      индексом подстраниц (напр. `/order/voennoslujaschim`), а не плоским листингом —
+      исправлено в `docs/STAGE0.md`, сканирование подстраниц не реализовано в этой
+      итерации (отдельная задача на будущее, `sources/sfr.py` пока покрывает только
+      `press_center/news/`). 4 теста (`tests/test_sources_sfr.py`,
+      `tests/test_sources_mintrud.py`) на реальных фрагментах вёрстки.
 - [ ] Адаптер `sources/pravo_gov.py`, `sources/kremlin.py`, `sources/government.py` —
       через `RU_PROXY_URL` по HTTP; пометить как требующие проверки с боевого VPS.
 - [ ] Адаптер `sources/mos_ru.py` (`mos.ru/authority/documents/`) и
