@@ -10,7 +10,7 @@ import datetime as dt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.enums import RejectionReason, Region, SignalCategory, SignalStatus, EventType, Priority
+from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
 from db.models import DocumentSeen, Signal, SignalCategoryLink, SourceState, StatusHistory
 
 # Допустимые переходы статуса сигнала (AGENTS.md раздел 6):

@@ -76,10 +76,10 @@ class Signal(Base):
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
 
-    categories: Mapped[list["SignalCategoryLink"]] = relationship(
+    categories: Mapped[list[SignalCategoryLink]] = relationship(
         back_populates="signal", cascade="all, delete-orphan"
     )
-    history: Mapped[list["StatusHistory"]] = relationship(
+    history: Mapped[list[StatusHistory]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", order_by="StatusHistory.changed_at"
     )
 

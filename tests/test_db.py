@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, RejectionReason, Region, SignalCategory, SignalStatus
+from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
 from db.models import DocumentSeen, Signal, SourceState
 from db.service import (
     InvalidStatusTransition,
