@@ -34,23 +34,36 @@ federal:
 # (AGENTS.md раздел 4), только новости/обзоры законодательства.
 other:
   - domain: garant.ru
-    url: https://www.garant.ru/
+    url: https://rss.garant.ru/news/
     access: direct
-    note: новости законодательства
+    note: >-
+      новости законодательства, RSS (rss.garant.ru — редирект с
+      garant.ru/rss/news/, проверено вживую 2026-08-20); опубликованные ссылки — на
+      www.garant.ru
   - domain: consultant.ru
-    url: https://www.consultant.ru/
+    url: https://www.consultant.ru/rss/hotdocs.xml
     access: direct
-    note: обзоры изменений
+    note: обзоры изменений, RSS — проверено вживую
   - domain: docs.cntd.ru
     url: https://docs.cntd.ru/comments
-    access: direct
-    note: обзоры изменений
+    access: unsupported
+    note: >-
+      обзоры изменений — сетевого доступа нет вовсе (таймаут, проверено вживую
+      2026-08-20), известная проблема measure_deepagent: SSO-redirect-loop без cookie
+      jar, нужен RU-прокси с полноценным cookie jar (docs/STAGE0.md раздел 1)
   - domain: tass.ru
+    url: https://tass.ru/rss/v2.xml
     access: direct
-    note: государственное информагентство
+    note: >-
+      государственное информагентство, RSS — требует браузероподобный User-Agent
+      (пустой ответ на дефолтный UA библиотек, проверено вживую)
   - domain: ria.ru
+    url: https://ria.ru/export/rss2/index.xml
     access: direct
-    note: государственное информагентство
+    note: государственное информагентство, RSS — проверено вживую
   - domain: rg.ru
+    url: https://rg.ru/xml/index.xml
     access: direct
-    note: "«Российская газета» — официальный публикатор НПА, альтернатива для конкретного акта"
+    note: >-
+      «Российская газета» — официальный публикатор НПА, альтернатива для конкретного
+      акта; RSS — проверено вживую

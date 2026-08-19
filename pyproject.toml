@@ -10,6 +10,7 @@ dependencies = [
     "tenacity>=8.2",
     "charset-normalizer>=3.0",
     "beautifulsoup4>=4.12",
+    "feedparser>=6.0",
 ]
 
 [project.optional-dependencies]
