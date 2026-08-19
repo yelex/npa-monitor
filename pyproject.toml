@@ -1,7 +1,7 @@
 [project]
 name = "npa-monitor"
 version = "0.1.0"
-description = "Мониторинг изменений в НПА (меры поддержки) — Этап 1: БД и общий слой"
+description = "Мониторинг изменений в НПА (меры поддержки)"
 requires-python = ">=3.10"
 dependencies = [
     "sqlalchemy>=2.0,<3.0",
@@ -17,4 +17,4 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["db"]
+packages = ["db", "parser", "parser.sources", "bot"]
