@@ -72,7 +72,7 @@ Docker Compose на VPS.
 | # | Этап | Оценка | Статус |
 |---|---|---|---|
 | 0 | Подготовка (ревью measure_deepagent, список источников Москвы, сетевая диагностика) | 1–2 дн | ✅ сделано, см. `docs/STAGE0.md` |
-| 1 | БД и общий слой | 1–2 дн | не начато |
+| 1 | БД и общий слой | 1–2 дн | ✅ сделано, коммит `2413e57` (`db/models.py`, `db/enums.py`, `db/service.py`, `db/session.py`, `tests/test_db.py`, 11 тестов) |
 | 2 | Parser MVP | 4–6 дн | не начато |
 | 3 | Bot MVP | 3–4 дн | не начато |
 | 4 | Интеграция / сквозной сценарий | 2 дн | не начато |
@@ -111,29 +111,40 @@ Docker Compose на VPS.
 
 ### Фаза 0 — Скелет проекта
 
-- [ ] Добавить в `.gitignore` типовые Python-игноры (venv, `__pycache__`, `*.db`,
+- [x] Добавить в `.gitignore` типовые Python-игноры (venv, `__pycache__`, `*.db`,
       `.env`, `ralph_logs/`) поверх уже существующего `_review_measure_deepagent/`.
-- [ ] Создать структуру пакетов: `parser/` (с `sources/`), `bot/`, `db/`, `data/`
-      (справочники ЖС/регионов), `tests/`.
-- [ ] Настроить `pyproject.toml`/`requirements.txt`: `httpx`, `tenacity`, `aiogram`,
-      `sqlalchemy`, `alembic`, `pymupdf`/`pdfplumber`, `pytesseract`, `pytest`.
-      Базовый `README.md` с инструкцией запуска для разработчика.
+- [ ] Создать структуру пакетов: `parser/` (с `sources/`), `bot/`, `data/`
+      (справочники ЖС/регионов) — `db/` и `tests/` уже существуют (Фаза 1).
+- [x] `pyproject.toml` создан (Фаза 1, зависимость `sqlalchemy`). Осталось: добавить
+      `httpx`, `tenacity`, `aiogram`, `pymupdf`/`pdfplumber`, `pytesseract` по мере
+      реализации соответствующих фаз (не всё сразу). Alembic — сознательно не добавлен,
+      см. примечание к Фазе 1 ниже.
+- [ ] Базовый `README.md` с инструкцией запуска для разработчика.
 - [ ] Настроить `.env.example` (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`,
-      `GLM_API_KEY`, `GLM_API_URL`, `AUTOUPDATE_AGENT_*`, `RU_PROXY_URL` — заглушки,
-      реальные значения не коммитить).
+      `GLM_PERSONAL_API_KEY`, `GLM_PERSONAL_BASE_URL`, `GLM_PERSONAL_MODEL`,
+      `AUTOUPDATE_AGENT_*`, `RU_PROXY_URL` — заглушки, реальные значения не коммитить).
 - [ ] Настроить базовый локальный CI-шаг (`pytest` + линтер), Makefile/скрипт если нет
       CI-платформы.
 
-### Фаза 1 — БД и общий слой (`db/`)
+### Фаза 1 — БД и общий слой (`db/`) — ✅ сделано (коммит `2413e57`)
 
-- [ ] Модели SQLAlchemy 2.0: `signals`, `signal_categories`, `status_history`,
+- [x] Модели SQLAlchemy 2.0: `signals`, `signal_categories`, `status_history`,
       `sources_state`, `documents_seen`, `experts` (раздел 2 выше и раздел 7 AGENTS.md).
-- [ ] Alembic-миграции, инициализация схемы (idempotent).
-- [ ] CRUD-слой сигналов: создать, изменить статус (с записью в `status_history` и
-      проверкой допустимости перехода по таблице раздела 6 AGENTS.md), выборки по
-      фильтрам (`/today`, `/pending`, `/history`, `/stats`).
-- [ ] Дедупликация через `documents_seen` (по URL/ID документа).
-- [ ] Юнит-тесты слоя БД (создание, переходы статусов, недопустимые переходы, дедуп).
+      См. `db/models.py`, `db/enums.py`.
+- [x] Инициализация схемы через `Base.metadata.create_all` (`db/session.py`), SQLite
+      WAL. **Решение:** Alembic-миграции сознательно отложены за пределы MVP (схема
+      пока меняется целиком через `create_all`, не через миграции) — не пробел, а
+      осознанное упрощение, зафиксированное в докстринге `db/session.py`. Вернуться к
+      этому, когда схема стабилизируется или потребуется production-миграция без
+      потери данных.
+- [x] CRUD-слой сигналов: `db/service.py` — `create_signal`, `transition_status` (с
+      валидацией допустимых переходов по `ALLOWED_TRANSITIONS`, включая `/reopen`:
+      Отклонён → Новый), `register_document_seen` (дедуп), `update_source_state`
+      (доверстывание). Выборки по фильтрам `/today /pending /history /stats` — ещё не
+      реализованы, добавить в Фазе 5 (Bot MVP) вместе с самими командами.
+- [x] Дедупликация через `documents_seen` (по `doc_url`, уникальный констрейнт).
+- [x] Юнит-тесты слоя БД: `tests/test_db.py`, 11 тестов, зелёные
+      (`python -m pytest tests/test_db.py` — проверено при слиянии).
 
 ### Фаза 2 — Справочники (данные, не код)
 
@@ -182,10 +193,13 @@ Docker Compose на VPS.
 - [ ] Приоритизация по правилам раздела 7 AGENTS.md.
 - [ ] Извлечение даты вступления в силу: regex-эвристики («вступает в силу с…»); точка
       расширения под LLM-fallback (раздел 6 выше), не обязательна для MVP.
-- [ ] Интерфейс `ClassifierClient`/`GLMClient` под будущий LLM-fallback.
-      <!-- BLOCKED: нужен пример вызова и креды GLM от пользователя, см. AGENTS.md
-      раздел 16, пункт 9 --> — до получения кредов реализовать интерфейс с мок-заглушкой
-      и юнит-тестами на контракте, не блокируя остальной parser.
+- [ ] Интерфейс `ClassifierClient`/`GLMClient` под будущий LLM-fallback. Креды и
+      рабочий паттерн вызова найдены в `/Users/user/dev/auto` (см. AGENTS.md раздел 16,
+      пункт 9) — `langchain_openai.ChatOpenAI(base_url="https://api.z.ai/api/coding/paas/v4",
+      api_key=os.getenv("GLM_PERSONAL_API_KEY"), model="glm-5.1", ...)`, обычная
+      OpenAI-совместимая схема. Значения переменных `GLM_PERSONAL_API_KEY`,
+      `GLM_PERSONAL_BASE_URL`, `GLM_PERSONAL_MODEL` скопировать в `.env` этого проекта
+      (не в git) из `/Users/user/dev/auto/.env`.
 - [ ] Сборка объекта «сигнал» из результатов классификации, запись в БД со статусом
       «Новый».
 - [ ] Тесты классификации на синтетических примерах публикаций (по каждой ЖС, по
@@ -205,8 +219,14 @@ Docker Compose на VPS.
 - [ ] Команда `/reopen <id>` для отклонённых сигналов → статус «Новый».
 - [ ] Адаптер `AutoUpdateAgentClient` (интерфейс) для передачи ссылки + `measureId`
       внешнему агенту автообновления.
-      <!-- BLOCKED: контракт API/webhook неизвестен, см. AGENTS.md раздел 16, пункт 8
-      --> — до уточнения реализовать как логирующую заглушку за интерфейсом.
+      <!-- BLOCKED: агент автообновления — это `/Users/user/dev/auto` (LangGraph-пайплайн
+      `product_agent`), но НЕ готовый API: HTTP-роуты монтируются только внутри
+      проприетарного Sberbank-рантайма `dab2c_aef_framework`, которого в репозитории нет.
+      Есть рабочий скрипт `run_offline_pipeline.py` (принимает текст документа, не URL).
+      Нужно решение пользователя перед этой задачей: (а) вызывать как библиотеку/
+      сабпроцесс `run_offline_pipeline.py` локально, или (б) ждать реально задеплоенный
+      Sberbank-эндпоинт и интегрироваться по HTTP. См. AGENTS.md раздел 16, пункт 8. -->
+      — до решения реализовать как логирующую заглушку за интерфейсом.
 - [ ] Команды `/today`, `/pending`, `/history` (последние 10), `/stats` (агрегация за
       неделю).
 - [ ] Напоминание о сигналах >3 дней в статусе «В работе» (фоновая задача).
