@@ -119,12 +119,17 @@ Docker Compose на VPS.
       `httpx`, `tenacity`, `aiogram`, `pymupdf`/`pdfplumber`, `pytesseract` по мере
       реализации соответствующих фаз (не всё сразу). Alembic — сознательно не добавлен,
       см. примечание к Фазе 1 ниже.
-- [ ] Базовый `README.md` с инструкцией запуска для разработчика.
-- [ ] Настроить `.env.example` (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`,
+- [x] Базовый `README.md` с инструкцией запуска для разработчика.
+- [x] Настроить `.env.example` (`TELEGRAM_BOT_TOKEN`, `ALLOWED_TELEGRAM_USER_IDS`,
       `GLM_PERSONAL_API_KEY`, `GLM_PERSONAL_BASE_URL`, `GLM_PERSONAL_MODEL`,
       `AUTOUPDATE_AGENT_*`, `RU_PROXY_URL` — заглушки, реальные значения не коммитить).
-- [ ] Настроить базовый локальный CI-шаг (`pytest` + линтер), Makefile/скрипт если нет
-      CI-платформы.
+- [x] CI: `.github/workflows/ci.yml` (`ruff check .` + `pytest` на push/PR в `main`),
+      `ruff` добавлен как dev-зависимость, конфиг в `pyproject.toml`
+      (`[tool.ruff]`/`[tool.ruff.lint]`). Существующий код Фазы 1 прогнан через
+      `ruff --fix` (сортировка импортов, лишние кавычки в forward-ref, `typing.Iterator`
+      → `collections.abc.Iterator`) — поведение не менялось, тесты остались зелёными.
+
+**Фаза 0 завершена.**
 
 ### Фаза 1 — БД и общий слой (`db/`) — ✅ сделано (коммит `2413e57`)
 
