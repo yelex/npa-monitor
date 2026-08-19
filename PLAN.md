@@ -192,10 +192,16 @@ Docker Compose на VPS.
       итерации (отдельная задача на будущее, `sources/sfr.py` пока покрывает только
       `press_center/news/`). 4 теста (`tests/test_sources_sfr.py`,
       `tests/test_sources_mintrud.py`) на реальных фрагментах вёрстки.
-- [ ] Адаптер `sources/pravo_gov.py`, `sources/kremlin.py`, `sources/government.py` —
-      через `RU_PROXY_URL` по HTTP; пометить как требующие проверки с боевого VPS.
-- [ ] Адаптер `sources/mos_ru.py` (`mos.ru/authority/documents/`) и
-      `sources/msupport_dszn.py` — региональные источники MVP (Москва).
+- [x] Адаптер `sources/pravo_gov.py` (`fetch_documents`, AJAX `/Documents/search`),
+      `sources/kremlin.py` (`fetch_news`), `sources/government.py` (`fetch_docs`) — все
+      на `access="ru_proxy"`, реализованы и протестированы на реальной вёрстке. См.
+      `docs/STAGE0.md` раздел 4 для деталей находок (AJAX-эндпоинт pravo.gov.ru,
+      HTTPS-таймаут government.ru). Схему `RU_PROXY_URL` всё ещё нужно подтвердить на
+      боевом VPS — доступность из среды разработки не гарантирует то же на проде.
+- [x] Адаптер `sources/mos_ru.py` (`fetch_documents`, парсинг JSON `__NEXT_DATA__`,
+      устойчивее CSS-селекторов с build-хешем) и `sources/msupport_dszn.py`
+      (`fetch_news`, листинг `/news`, не главная страница) — региональные источники MVP
+      (Москва). Реализованы и протестированы на реальной вёрстке.
 - [ ] Адаптер для «иных» источников (`garant.ru`, `consultant.ru`, `docs.cntd.ru/comments`,
       `tass.ru`, `ria.ru`, `rg.ru`) — используются только как вспомогательный контекст,
       не единственное основание для сигнала.

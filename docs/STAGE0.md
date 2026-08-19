@@ -131,3 +131,50 @@ Allow-фильтр tinyproxy: 127.0.0.1, 46.30.43.146, 91.217.194.19, **151.243.
 - Для `mos.ru/dszn/` (и любых других JS-рендер-разделов) — заложить в оценку Этапа 2, нужен
   ли Playwright/аналог в стек парсера, или достаточно обходиться без этого раздела и опираться
   на `mos.ru/authority/documents/` + `msupport.dszn.ru` (оба статические/API-доступные).
+
+---
+
+## 4. Реализация адаптеров (Этап 2, 2026-08-20)
+
+Все 7 адаптеров `parser/sources/` реализованы и покрыты тестами на реальной вёрстке,
+снятой вживую (не придуманной) — сеть из среды разработки в этот раз оказалась доступна
+для проверки, включая RSNET-домены. Находки, уточняющие раздел 2:
+
+- **`publication.pravo.gov.ru`**: `/documents/daily` — не листинг, а SPA-обёртка;
+  реальный список подгружается AJAX-эндпоинтом `/Documents/search?periodType=<daily|
+  weekly|monthly>&index=<N>` (найден в `/js/documents.js`), отдающим HTML-фрагмент.
+  `periodType=daily` в момент проверки не дал результатов (пусто на эту дату/час),
+  `periodType=weekly` — 1463 документа, структура подтверждена. Адаптер:
+  `parser/sources/pravo_gov.py::fetch_documents`.
+- **`kremlin.ru/acts/news`**: server-rendered, schema.org-микроразметка
+  (`itemtype=NewsArticle`), ISO-дата в `<time datetime>`. Адаптер:
+  `parser/sources/kremlin.py::fetch_news`.
+- **`government.ru/docs/`**: server-rendered, `div.headline` с ISO-датой и «лидом»
+  (реквизиты вида «Распоряжение от … №…» отдельным полем). HTTPS не отвечает даже
+  плейн-запросом (таймаут), HTTP — работает. Адаптер:
+  `parser/sources/government.py::fetch_docs`.
+- **Сетевая доступность RSNET-домена из среды разработки в этот раз**: `kremlin.ru` и
+  `publication.pravo.gov.ru` ответили по HTTP напрямую, без прокси (в отличие от
+  Frankfurt VPS в разделе 2.1). Это может быть особенностью конкретной среды/маршрута,
+  **не отменяет** решение по `RU_PROXY_URL` из раздела 2.1 — адаптеры всё равно
+  реализованы с `access="ru_proxy"` (см. `data/sources.yaml`), схему нужно подтвердить
+  на боевом VPS перед продакшен-запуском, а не полагаться на доступность из площадки
+  разработки.
+- **`mos.ru/authority/documents/`**: Next.js-страница, список НПА дублируется в
+  статичном HTML (CSS-module классы с build-хешем — нестабильны между деплоями!) и в
+  JSON `<script id="__NEXT_DATA__">` → `props.pageProps.initialState.documentsList.data`
+  (поля `id`, `title`, `number`, `date_published`). Адаптер использует JSON, не CSS-
+  селекторы. Побочный нюанс среды разработки: `curl`(LibreSSL) не смог согласовать TLS
+  с `www.mos.ru` (`SSL_ERROR_SYSCALL` в середине handshake), при этом Python
+  `urllib`/`httpx` через тот же сетевой путь отработали штатно — если кто-то будет
+  через `curl` проверять доступность mos.ru и получит ошибку TLS, это не обязательно
+  означает недоступность для парсера. Адаптер: `parser/sources/mos_ru.py::fetch_documents`.
+- **`msupport.dszn.ru`**: полноценный листинг — не главная страница (там только 4
+  карточки-тизера), а `/news` (12 карточек, пагинация `/news/page-N`). Ссылки в
+  карточках ведут на другой домен, `dszn.ru` (`press-center/news/...`) — ожидаемо, оба
+  домена в белом списке (`data/regions.yaml`). Адаптер:
+  `parser/sources/msupport_dszn.py::fetch_news`.
+
+PDF-парсинг (pymupdf/pdfplumber + pytesseract fallback), `state.py` (доверстывание),
+проверка домена по белому списку и фильтр по типу контента — ещё не реализованы, см.
+`PLAN.md` Фаза 3.
