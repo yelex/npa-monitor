@@ -5,6 +5,7 @@ description = "Мониторинг изменений в НПА (меры по�
 requires-python = ">=3.10"
 dependencies = [
     "sqlalchemy>=2.0,<3.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
