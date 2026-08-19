@@ -202,15 +202,33 @@ Docker Compose на VPS.
       устойчивее CSS-селекторов с build-хешем) и `sources/msupport_dszn.py`
       (`fetch_news`, листинг `/news`, не главная страница) — региональные источники MVP
       (Москва). Реализованы и протестированы на реальной вёрстке.
-- [ ] Адаптер для «иных» источников (`garant.ru`, `consultant.ru`, `docs.cntd.ru/comments`,
-      `tass.ru`, `ria.ru`, `rg.ru`) — используются только как вспомогательный контекст,
-      не единственное основание для сигнала.
-- [ ] PDF-парсинг: `pymupdf`/`pdfplumber` как основной слой, `pytesseract`-fallback,
-      если текстовый слой пустой/короткий.
-- [ ] `state.py`: хранение даты последнего успешного обхода per-источник, доверстывание
-      пропущенных периодов (не только «за последние 24 часа»).
-- [ ] Проверка домена публикации по белому списку перед дальнейшей обработкой.
-- [ ] Фильтр по типу контента: только текстовые публикации.
+- [x] Адаптер «иных» источников — `sources/other.py::fetch_feed`/`fetch_all`: RSS для
+      `garant.ru`, `consultant.ru`, `tass.ru`, `ria.ru`, `rg.ru` (все проверены вживую,
+      URL — реальные RSS-эндпоинты, не главные страницы). `docs.cntd.ru` — сетевой
+      недоступен (таймаут, известная проблема, `access: unsupported` в
+      `data/sources.yaml`), не реализован. 4 теста (`tests/test_sources_other.py`).
+- [x] PDF-парсинг: `parser/pdf.py::extract_text` — PyMuPDF (`fitz`) как основной слой,
+      `pytesseract`-fallback (lang=`rus`) если текст страницы короче
+      `MIN_PAGE_TEXT_LENGTH`. `pdfplumber` не использован — PyMuPDF даёт и текст, и
+      рендер страницы в изображение для OCR одним пакетом. Тесты мокают OCR-вызов —
+      бинарника `tesseract` нет в среде разработки/CI (нужен на боевом VPS, см. Фазу 7).
+      4 теста (`tests/test_pdf.py`).
+- [x] `parser/state.py::fetch_window_start`/`mark_source_processed` — хранение даты
+      последнего успешного обхода per-источник через `db.models.SourceState`,
+      доверстывание пропущенных периодов (не жёстко «последние 24 часа»). 4 теста
+      (`tests/test_state.py`).
+- [x] `parser/filters.py::is_domain_whitelisted` — проверка домена (с поддоменами) по
+      белому списку, `is_text_content` — фильтр по типу контента (HTML/plain/PDF).
+      7 тестов (`tests/test_filters.py`).
+
+**Побочная находка при разработке `state.py`:** SQLite через SQLAlchemy теряет
+`tzinfo` при чтении даже для колонок `DateTime(timezone=True)` — затрагивало всю схему
+Фазы 1, не только новый код. Исправлено в `db/types.py::UTCDateTime` (см. отдельный
+коммит) — все datetime-колонки `db/models.py` переведены на этот тип, старый тест
+`tests/test_db.py::test_source_state_upsert`, ранее подстроенный под баг, приведён в
+соответствие с исправленным поведением.
+
+**Фаза 3 завершена.**
 
 ### Фаза 4 — Классификация и формирование сигнала
 
