@@ -11,6 +11,9 @@ dependencies = [
     "charset-normalizer>=3.0",
     "beautifulsoup4>=4.12",
     "feedparser>=6.0",
+    "pymupdf>=1.24",
+    "pytesseract>=0.3.10",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
