@@ -43,7 +43,7 @@ REVIEW_MARKER_RE = re.compile(
 )
 
 REPEAL_RE = re.compile(r"\b(?:утратил\w*\s+силу|отмен[её]n?н?\b|признан\s+утратившим)", re.IGNORECASE)
-AMENDMENT_RE = re.compile(r"\b(?:внесени\w+\s+изменени\w+|изменени\w*\s+в\s+\w[а-я]*\s*(?:закон|постановлен|указ|приказ))", re.IGNORECASE)
+AMENDMENT_RE = re.compile(r"\b(?:внесени\w+\s+изменени\w+|изменени\w+\s+в\s+\w+|внесены\s+изменения)", re.IGNORECASE)
 ENTRY_INTO_FORCE_RE = re.compile(
     r"\bвступ(?:ает|ил)\s+в\s+силу\s+(?:с\s+)?(\d{1,2}[./]\d{1,2}[./]\d{2,4})", re.IGNORECASE
 )
@@ -76,9 +76,31 @@ class Classification:
     reason: str  # почему релевантно/нет — для отладки и логов
 
 
+def _kw_hit(keyword: str, lowered: str) -> bool:
+    """Матчинг ключа с учётом словоизменения: «выплаты ветеранам боевых действий»
+    должен ловиться по ключу «ветеран боевых действий».
+
+    Эвристика: каждое слово ключа ищем по префиксу стема — для русских слов
+    обрезаем окончание (последние 2 символа, если слово длиннее 4) и требуем
+    вхождения этого префикса в текст как подстроки.
+    """
+    if keyword.lower() in lowered:
+        return True
+    stems: list[str] = []
+    for word in re.split(r"[\s\-]+", keyword.lower()):
+        stem = word[:-2] if len(word) > 4 else word
+        if not stem:
+            return False
+        stems.append(stem)
+    # все стемы должны встретиться в тексте (в любом порядке/склонении)
+    return all(stem in lowered for stem in stems)
+
+
 def _match_groups(text: str, groups: dict[SignalCategory, tuple[str, ...]]) -> tuple[SignalCategory, ...]:
     lowered = text.lower()
-    return tuple(cat for cat, kws in groups.items() if any(kw.lower() in lowered for kw in kws))
+    return tuple(
+        cat for cat, kws in groups.items() if any(_kw_hit(kw, lowered) for kw in kws)
+    )
 
 
 def _parse_date(raw: str) -> dt.date | None:
@@ -97,7 +119,7 @@ def classify(pub: Publication, ls_keywords: dict[SignalCategory, tuple[str, ...]
     lowered = text.lower()
 
     categories = _match_groups(text, ls_keywords)
-    has_measure = any(kw.lower() in lowered for kw in MEASURE_KEYWORDS)
+    has_measure = any(_kw_hit(kw, lowered) for kw in MEASURE_KEYWORDS)
     has_doc_marker = bool(DOCUMENT_MARKER_RE.search(text))
     has_action_marker = bool(ACTION_MARKER_RE.search(text))
 
@@ -126,7 +148,8 @@ def classify(pub: Publication, ls_keywords: dict[SignalCategory, tuple[str, ...]
     elif has_doc_marker or has_action_marker:
         event_type = EventType.NEW_DOCUMENT
     else:
-        event_type = None
+        event_type = EventType.REVIEW if REVIEW_MARKER_RE.search(text) else None
+    assert event_type is not None or not REVIEW_MARKER_RE.search(text)
 
     m = ENTRY_INTO_FORCE_RE.search(text)
     effective_from = _parse_date(m.group(1)) if m else None
