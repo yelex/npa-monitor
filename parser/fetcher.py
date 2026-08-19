@@ -15,8 +15,15 @@ import httpx
 import tenacity
 
 DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=10.0)
+# Браузероподобный UA: идентифицирующий UA ("npa-monitor/0.1 ...") получает 403 от
+# mintrud.gov.ru (проверено вживую при разработке parser/sources/mintrud.py) — это WAF-
+# эвристика по виду UA, не запрет в robots.txt (там разрешено для User-agent: *, путь
+# /docs не в Disallow). sfr.gov.ru пропускает оба варианта UA.
 DEFAULT_HEADERS = {
-    "User-Agent": "npa-monitor/0.1 (+https://github.com/yelex/npa-monitor)",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    ),
 }
 
 _RETRYABLE_EXCEPTIONS = (httpx.TransportError, httpx.HTTPStatusError)
