@@ -1,0 +1,16 @@
+_review_measure_deepagent/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Runtime / data
+*.db
+*.sqlite3
+.env
+
+# Ralph loop
+ralph_logs/
