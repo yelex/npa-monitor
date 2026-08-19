@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from db.enums import Region, SignalCategory
+from db.enums import EventType, Region, SignalCategory
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -48,6 +48,14 @@ class RegionEntry:
     name: str
     region: Region
     sources: tuple[Source, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ClassificationKeywords:
+    topic_block: tuple[str, ...]
+    document_markers: tuple[str, ...]
+    priority_high_words: tuple[str, ...]
+    event_type_markers: dict[EventType, tuple[str, ...]]
 
 
 def _load_yaml(path: Path) -> Any:
@@ -97,6 +105,28 @@ def load_regions(path: Path | None = None) -> tuple[RegionEntry, ...]:
         sources = tuple(Source(**s) for s in item.get("sources", []))
         result.append(RegionEntry(code=item["code"], name=item["name"], region=region, sources=sources))
     return tuple(result)
+
+
+def load_classification_keywords(path: Path | None = None) -> ClassificationKeywords:
+    raw = _load_yaml(path or DATA_DIR / "keywords.yaml") or {}
+
+    event_type_markers: dict[EventType, tuple[str, ...]] = {}
+    for key, words in (raw.get("event_type_markers") or {}).items():
+        try:
+            event_type = EventType(key)
+        except ValueError as exc:
+            raise CatalogError(
+                f"keywords.yaml: event_type_markers содержит {key!r}, не соответствует "
+                f"db.enums.EventType"
+            ) from exc
+        event_type_markers[event_type] = tuple(words)
+
+    return ClassificationKeywords(
+        topic_block=tuple(raw.get("topic_block", [])),
+        document_markers=tuple(raw.get("document_markers", [])),
+        priority_high_words=tuple(raw.get("priority_high_words", [])),
+        event_type_markers=event_type_markers,
+    )
 
 
 def all_domains(

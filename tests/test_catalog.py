@@ -6,8 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from db.catalog import CatalogError, Source, all_domains, load_life_situations, load_regions, load_sources
-from db.enums import Region, SignalCategory
+from db.catalog import (
+    CatalogError,
+    Source,
+    all_domains,
+    load_classification_keywords,
+    load_life_situations,
+    load_regions,
+    load_sources,
+)
+from db.enums import EventType, Region, SignalCategory
 
 
 def test_load_life_situations_default_covers_all_categories() -> None:
@@ -113,3 +121,34 @@ def test_unknown_region_code_raises_catalog_error(tmp_path: Path) -> None:
 def test_missing_catalog_file_raises_catalog_error(tmp_path: Path) -> None:
     with pytest.raises(CatalogError, match="не найден"):
         load_life_situations(tmp_path / "does_not_exist.yaml")
+
+
+def test_load_classification_keywords_default_covers_expected_groups() -> None:
+    keywords = load_classification_keywords()
+
+    assert "выплата" in keywords.topic_block
+    assert "постановление" in keywords.document_markers
+    assert "новый" in keywords.priority_high_words
+    assert set(keywords.event_type_markers) == {
+        EventType.REPEAL,
+        EventType.ENTRY_INTO_FORCE,
+        EventType.AMENDMENT,
+        EventType.NEW_DOCUMENT,
+    }
+    assert "утратил силу" in keywords.event_type_markers[EventType.REPEAL]
+
+
+def test_unknown_event_type_marker_key_raises_catalog_error(tmp_path: Path) -> None:
+    custom_path = tmp_path / "keywords.yaml"
+    custom_path.write_text(
+        textwrap.dedent(
+            """
+            event_type_markers:
+              unknown_event: [что-то]
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CatalogError, match="unknown_event"):
+        load_classification_keywords(custom_path)
