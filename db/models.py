@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime as dt
 
 from sqlalchemy import (
-    DateTime,
     Enum,
     ForeignKey,
     Index,
@@ -26,6 +25,7 @@ from db.enums import (
     SignalCategory,
     SignalStatus,
 )
+from db.types import UTCDateTime
 
 
 def _utcnow() -> dt.datetime:
@@ -71,10 +71,8 @@ class Signal(Base):
     )
     rejection_comment: Mapped[str | None] = mapped_column(Text, default=None)
 
-    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
-    )
+    created_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow, onupdate=_utcnow)
 
     categories: Mapped[list[SignalCategoryLink]] = relationship(
         back_populates="signal", cascade="all, delete-orphan"
@@ -114,7 +112,7 @@ class StatusHistory(Base):
         Enum(SignalStatus, native_enum=False, length=32), default=None
     )
     to_status: Mapped[SignalStatus] = mapped_column(Enum(SignalStatus, native_enum=False, length=32))
-    changed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    changed_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
     changed_by: Mapped[str | None] = mapped_column(String(128), default=None)  # telegram id/имя эксперта
     reason: Mapped[str | None] = mapped_column(Text, default=None)
 
@@ -129,13 +127,9 @@ class SourceState(Base):
     __tablename__ = "sources_state"
 
     source_key: Mapped[str] = mapped_column(String(128), primary_key=True)  # напр. "mintrud.gov.ru/docs"
-    last_success_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), default=None
-    )
+    last_success_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime, default=None)
     last_seen_publication_date: Mapped[dt.date | None] = mapped_column(default=None)
-    updated_at: Mapped[dt.datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
-    )
+    updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class DocumentSeen(Base):
@@ -146,7 +140,7 @@ class DocumentSeen(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_key: Mapped[str] = mapped_column(String(128))
     doc_url: Mapped[str] = mapped_column(Text)
-    first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    first_seen_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
     signal_id: Mapped[int | None] = mapped_column(
         ForeignKey("signals.id", ondelete="SET NULL"), default=None
     )
@@ -163,4 +157,4 @@ class Expert(Base):
     telegram_id: Mapped[int] = mapped_column(unique=True, index=True)
     name: Mapped[str | None] = mapped_column(String(128), default=None)
     is_active: Mapped[bool] = mapped_column(default=True)
-    added_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    added_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)

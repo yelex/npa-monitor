@@ -177,6 +177,6 @@ def test_source_state_upsert(session: Session):
 
     assert session.query(SourceState).count() == 1
     state = session.get(SourceState, "mintrud.gov.ru/docs")
-    # SQLite не хранит tzinfo — сравниваем naive-версию (значения были в UTC).
-    assert state.last_success_at == later.replace(tzinfo=None)
+    # db.types.UTCDateTime гарантирует tz-aware datetime на чтении даже на SQLite.
+    assert state.last_success_at == later
     assert state.last_seen_publication_date == later.date()
