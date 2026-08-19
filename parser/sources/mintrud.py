@@ -10,46 +10,18 @@
 """
 from __future__ import annotations
 
-import datetime as dt
-import re
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from parser.fetcher import fetch
 from parser.models import Publication
+from parser.ru_dates import parse_russian_date
 
 BASE_URL = "https://mintrud.gov.ru"
 DOCS_URL = f"{BASE_URL}/docs"
 SOURCE_KEY = "mintrud.gov.ru/docs"
 DEFAULT_DIRECTORY_ID = 128
-
-_MONTHS = {
-    "января": 1,
-    "февраля": 2,
-    "марта": 3,
-    "апреля": 4,
-    "мая": 5,
-    "июня": 6,
-    "июля": 7,
-    "августа": 8,
-    "сентября": 9,
-    "октября": 10,
-    "ноября": 11,
-    "декабря": 12,
-}
-_DATE_RE = re.compile(r"(\d{1,2})\s+([а-яё]+)\s+(\d{4})", re.IGNORECASE)
-
-
-def _parse_russian_date(text: str) -> dt.datetime | None:
-    match = _DATE_RE.search(text.lower())
-    if match is None:
-        return None
-    day, month_name, year = match.groups()
-    month = _MONTHS.get(month_name)
-    if month is None:
-        return None
-    return dt.datetime(int(year), month, int(day), tzinfo=dt.timezone.utc)
 
 
 def _parse_docs_page(html: str) -> list[Publication]:
@@ -63,7 +35,7 @@ def _parse_docs_page(html: str) -> list[Publication]:
             continue
 
         date_el = item.select_one("p.page-date")
-        published_at = _parse_russian_date(date_el.get_text()) if date_el is not None else None
+        published_at = parse_russian_date(date_el.get_text()) if date_el is not None else None
 
         publications.append(
             Publication(

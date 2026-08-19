@@ -11,42 +11,15 @@ AGENTS.md раздел 3.
 """
 from __future__ import annotations
 
-import datetime as dt
-
 from bs4 import BeautifulSoup
 
 from parser.fetcher import fetch
 from parser.models import Publication
+from parser.ru_dates import parse_russian_date
 
 BASE_URL = "https://msupport.dszn.ru"
 NEWS_URL = f"{BASE_URL}/news"
 SOURCE_KEY = "msupport.dszn.ru/news"
-
-_MONTHS = {
-    "января": 1,
-    "февраля": 2,
-    "марта": 3,
-    "апреля": 4,
-    "мая": 5,
-    "июня": 6,
-    "июля": 7,
-    "августа": 8,
-    "сентября": 9,
-    "октября": 10,
-    "ноября": 11,
-    "декабря": 12,
-}
-
-
-def _parse_russian_date(text: str) -> dt.datetime | None:
-    parts = text.strip().lower().split()
-    if len(parts) < 3:
-        return None
-    day_str, month_name, year_str = parts[0], parts[1], parts[2]
-    month = _MONTHS.get(month_name)
-    if month is None or not day_str.isdigit() or not year_str.isdigit():
-        return None
-    return dt.datetime(int(year_str), month, int(day_str), tzinfo=dt.timezone.utc)
 
 
 def _parse_news_page(html: str) -> list[Publication]:
@@ -59,7 +32,7 @@ def _parse_news_page(html: str) -> list[Publication]:
             continue
 
         date_el = card.select_one("span.date")
-        published_at = _parse_russian_date(date_el.get_text()) if date_el is not None else None
+        published_at = parse_russian_date(date_el.get_text()) if date_el is not None else None
 
         publications.append(
             Publication(
