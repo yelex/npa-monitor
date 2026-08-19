@@ -113,7 +113,7 @@ Docker Compose на VPS.
 
 - [x] Добавить в `.gitignore` типовые Python-игноры (venv, `__pycache__`, `*.db`,
       `.env`, `ralph_logs/`) поверх уже существующего `_review_measure_deepagent/`.
-- [ ] Создать структуру пакетов: `parser/` (с `sources/`), `bot/`, `data/`
+- [x] Создать структуру пакетов: `parser/` (с `sources/`), `bot/`, `data/`
       (справочники ЖС/регионов) — `db/` и `tests/` уже существуют (Фаза 1).
 - [x] `pyproject.toml` создан (Фаза 1, зависимость `sqlalchemy`). Осталось: добавить
       `httpx`, `tenacity`, `aiogram`, `pymupdf`/`pdfplumber`, `pytesseract` по мере
