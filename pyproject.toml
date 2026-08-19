@@ -10,6 +10,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
 ]
 
 [build-system]
@@ -18,3 +19,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["db", "parser", "parser.sources", "bot"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
