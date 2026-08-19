@@ -1,0 +1,56 @@
+# Белый список источников парсера, AGENTS.md раздел 4.
+#
+# access:
+#   direct     — прямой HTTP(S)-запрос работает (docs/STAGE0.md, раздел 2)
+#   ru_proxy   — сеть RSNET режет не-РФ IP на 443/80; доступ по HTTP через RU_PROXY_URL
+#                (docs/STAGE0.md, раздел 2.1); подтвердить схему на боевом VPS
+#   unsupported — известен, но парсером пока не обходится (JS-рендер и т.п.)
+#
+# Региональные источники (Москва в MVP) — в data/regions.yaml, не здесь.
+
+federal:
+  - domain: publication.pravo.gov.ru
+    url: http://publication.pravo.gov.ru/
+    access: ru_proxy
+    note: официальные опубликования — единственный источник опубликования федеральных актов
+  - domain: kremlin.ru
+    url: http://www.kremlin.ru/
+    access: ru_proxy
+    note: указы и поручения Президента РФ
+  - domain: government.ru
+    url: https://government.ru/
+    access: ru_proxy
+    note: постановления и распоряжения Правительства РФ
+  - domain: sfr.gov.ru
+    url: https://sfr.gov.ru/
+    access: direct
+    note: Социальный фонд России — проверено, docs/STAGE0.md
+  - domain: mintrud.gov.ru
+    url: https://mintrud.gov.ru/
+    access: direct
+    note: Минтруд России — проверено, docs/STAGE0.md
+
+# Контекстные источники — не единственное основание для сигнала без подтверждения
+# (AGENTS.md раздел 4), только новости/обзоры законодательства.
+other:
+  - domain: garant.ru
+    url: https://www.garant.ru/
+    access: direct
+    note: новости законодательства
+  - domain: consultant.ru
+    url: https://www.consultant.ru/
+    access: direct
+    note: обзоры изменений
+  - domain: docs.cntd.ru
+    url: https://docs.cntd.ru/comments
+    access: direct
+    note: обзоры изменений
+  - domain: tass.ru
+    access: direct
+    note: государственное информагентство
+  - domain: ria.ru
+    access: direct
+    note: государственное информагентство
+  - domain: rg.ru
+    access: direct
+    note: "«Российская газета» — официальный публикатор НПА, альтернатива для конкретного акта"
