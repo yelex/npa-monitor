@@ -1,1 +1,10 @@
 _review_measure_deepagent/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+*.db
+*.db-shm
+*.db-wal
+
