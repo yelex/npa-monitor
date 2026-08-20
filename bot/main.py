@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import math
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
@@ -20,16 +19,35 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from sqlalchemy.orm import Session, sessionmaker
 
 from config import get_settings
+from db.catalog import all_domains
 from db.enums import Priority, RejectionReason, SignalStatus
 from db.models import Signal
 from db.service import transition_status
-from db.session import make_session_factory
+from db.session import init_db, make_engine, make_session_factory
+from parser.fetcher import SourceUnavailable, fetch
+from parser.filters import is_domain_whitelisted
 
 log = logging.getLogger("bot")
 
 router = Router()
+
+_session_factory: sessionmaker[Session] | None = None
+
+
+def get_session_factory() -> sessionmaker[Session]:
+    """`db.session.make_session_factory` требует `engine` — здесь он собирается один раз
+    из `config.get_settings().database_path` (не был передан ни разу в исходном коде
+    ветки `phase4-classifier`, откуда пришёл этот модуль — исправлено при слиянии)."""
+    global _session_factory
+    if _session_factory is None:
+        engine = make_engine(get_settings().database_path)
+        init_db(engine)
+        _session_factory = make_session_factory(engine)
+    return _session_factory
+
 
 CATEGORY_LABELS = {"veterans": "ВБД", "disabled": "Инвалиды", "svo": "СВО"}
 STATUS_LABELS = {
@@ -112,7 +130,7 @@ async def cmd_today(message: Message) -> None:
     if not is_allowed(message.from_user.id):
         return
     today = dt.date.today()
-    with make_session_factory()() as db:
+    with get_session_factory()() as db:
         signals = (
             db.query(Signal)
             .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
@@ -126,7 +144,7 @@ async def cmd_today(message: Message) -> None:
 async def cmd_pending(message: Message) -> None:
     if not is_allowed(message.from_user.id):
         return
-    with make_session_factory()() as db:
+    with get_session_factory()() as db:
         signals = (
             db.query(Signal)
             .filter(Signal.status.in_([SignalStatus.IN_PROGRESS, SignalStatus.POSTPONED]))
@@ -140,7 +158,7 @@ async def cmd_pending(message: Message) -> None:
 async def cmd_history(message: Message) -> None:
     if not is_allowed(message.from_user.id):
         return
-    with make_session_factory()() as db:
+    with get_session_factory()() as db:
         signals = (
             db.query(Signal)
             .filter(Signal.status.in_([
@@ -157,15 +175,17 @@ async def cmd_history(message: Message) -> None:
 async def cmd_stats(message: Message) -> None:
     if not is_allowed(message.from_user.id):
         return
-    week_ago = dt.datetime.now() - dt.timedelta(days=7)
-    with make_session_factory()() as db:
+    # tz-aware (UTC) — db.types.UTCDateTime требует aware datetime на входе, см. Signal.*
+    week_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
+    with get_session_factory()() as db:
         qs = db.query(Signal).filter(Signal.created_at >= week_ago).all()
     if not qs:
         await message.answer("За неделю сигналов нет.")
         return
     by_status: dict[str, int] = {}
     for s in qs:
-        by_status[STATUS_LABELS.get(s.status, s.status)] = by_status.get(STATUS_LABELS.get(s.status, s.status), 0) + 1
+        label = STATUS_LABELS.get(s.status, s.status)
+        by_status[label] = by_status.get(label, 0) + 1
     text = f"📊 За 7 дней: {len(qs)} сигналов\n" + "\n".join(
         f"• {k}: {v}" for k, v in sorted(by_status.items(), key=lambda kv: -kv[1])
     )
@@ -180,7 +200,7 @@ async def cmd_reopen(message: Message, command: CommandObject) -> None:
         await message.answer("Формат: /reopen <id>")
         return
     sig_id = int(command.args.strip())
-    db_factory = make_session_factory()
+    db_factory = get_session_factory()
     with db_factory() as db:
         s = db.get(Signal, sig_id)
         if not s:
@@ -200,7 +220,7 @@ async def cmd_digest(message: Message) -> None:
     """Утренняя сводка: группировка по приоритету (раздел 10 AGENTS.md)."""
     if not is_allowed(message.from_user.id):
         return
-    with make_session_factory()() as db:
+    with get_session_factory()() as db:
         signals = (
             db.query(Signal)
             .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
@@ -236,7 +256,7 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
         return
     _, sig_id_s, action = cb.data.split(":")
     sig_id = int(sig_id_s)
-    db_factory = make_session_factory()
+    db_factory = get_session_factory()
     with db_factory() as db:
         s = db.get(Signal, sig_id)
         if not s:
@@ -273,11 +293,16 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
         {"r_not_target": "not_target_category", "r_dup": "duplicate",
          "r_not_npa": "not_npa", "r_other": "other"}[code]
     )
-    db_factory = make_session_factory()
+    db_factory = get_session_factory()
     with db_factory() as db:
         s = db.get(Signal, sig_id)
         if s:
-            transition_status(db, s, SignalStatus.REJECTED, changed_by=cb.from_user.id, reason=reason)
+            # rejection_reason (не reason=) — иначе db.service.transition_status поднимает
+            # ValueError "Отклонение сигнала требует причины" (там reason — свободный
+            # текст-заметка в аудите, rejection_reason — структурированное поле Signal).
+            transition_status(
+                db, s, SignalStatus.REJECTED, changed_by=cb.from_user.id, rejection_reason=reason
+            )
             db.commit()
     await state.clear()
     await cb.message.edit_text(  # type: ignore[union-attr]
@@ -296,19 +321,44 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     sig_id = data["sig_id"]
     text = (message.text or "").strip()
-    db_factory = make_session_factory()
+
+    if text.lower() == "skip":
+        npa_link: str | None = None
+    elif not text.startswith("http"):
+        await message.answer("Пришлите ссылку на НПА (http/https) или 'skip', если она уже в карточке.")
+        return
+    else:
+        # AGENTS.md раздел 13: белый список доменов — до сетевого запроса.
+        if not is_domain_whitelisted(text, all_domains()):
+            await message.answer(
+                "Домен ссылки не в белом списке источников. Проверьте ссылку и отправьте ещё раз."
+            )
+            return
+        # AGENTS.md раздел 10: «бот проверяет доступность страницы» — вне DB-сессии,
+        # чтобы не держать транзакцию открытой во время сетевого запроса.
+        try:
+            fetch(text, access="direct")
+        except SourceUnavailable:
+            await message.answer(
+                "Ссылка недоступна. Проверьте её и отправьте ещё раз. Или загрузите файл напрямую."
+            )
+            return
+        npa_link = text
+
+    db_factory = get_session_factory()
     with db_factory() as db:
         s = db.get(Signal, sig_id)
         if not s:
             await message.answer("Сигнал исчез.")
             await state.clear()
             return
-        if text.lower() != "skip" and text.startswith("http"):
-            s.npa_link = text
+        if npa_link is not None:
+            s.npa_link = npa_link
         transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=message.from_user.id)
         db.commit()
-    # TODO Фаза 5: AutoUpdateAgentClient.send(npa_link, measure_id) — заглушка (PLAN.md BLOCKED)
-    log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
+        # TODO Фаза 5: AutoUpdateAgentClient.send(npa_link, measure_id) — заглушка (PLAN.md BLOCKED)
+        log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
+
     await message.answer("✅ Ссылка принята. Статус: Передан агенту.")
     await state.clear()
 
@@ -318,8 +368,9 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
 
 async def remind_stale(bot: Bot) -> None:
     """Сигналы >3 дней в «В работе» → напоминание (AGENTS.md раздел 12)."""
-    threshold = dt.datetime.now() - dt.timedelta(days=3)
-    db_factory = make_session_factory()
+    # tz-aware (UTC) — db.types.UTCDateTime требует aware datetime на входе.
+    threshold = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+    db_factory = get_session_factory()
     with db_factory() as db:
         stale = db.query(Signal).filter(
             Signal.status == SignalStatus.IN_PROGRESS, Signal.updated_at < threshold
