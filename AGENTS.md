@@ -414,7 +414,9 @@ webhook) пока нет — подробности и открытый выбо
    `AutoUpdateAgentClient` (PLAN.md, Фаза 5): (а) вызывать `product_agent`/
    `run_offline_pipeline.py` как библиотеку/сабпроцесс локально, или (б) ждать реально
    задеплоенный Sberbank-эндпоинт и интегрироваться по HTTP. Решить перед началом
-   Фазы 5.
+   Фазы 5. Интерфейс уже выделен — `bot/autoupdate_client.py::AutoUpdateAgentClient`
+   (заглушка, логирует вызов; вызывается из `bot/main.py::on_npa_link` при переходе в
+   «Передан агенту») — переход на реальный контракт не потребует правок `bot/main.py`.
 9. 🟢 Пример использования GLM и креды — найдены в `/Users/user/dev/auto`:
    `GLM_PERSONAL_API_KEY`/`GLM_PERSONAL_BASE_URL`/`GLM_PERSONAL_MODEL` в
    `/Users/user/dev/auto/.env`, паттерн вызова —
