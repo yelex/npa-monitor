@@ -466,3 +466,32 @@ async def test_send_digest_excludes_signals_in_progress() -> None:
 
     bot.send_message.assert_awaited_once_with(111, "Новых сигналов нет.")
     assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # не тронут
+
+
+async def test_cmd_digest_reports_no_signals_when_empty() -> None:
+    """AGENTS.md раздел 9: «Нет новых публикаций — бот отправляет «Новых сигналов нет»»."""
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_digest(message)
+
+    message.answer.assert_awaited_once_with("Новых сигналов нет.")
+
+
+async def test_postponed_signal_appears_in_next_digest() -> None:
+    """AGENTS.md раздел 9: «Эксперт нажал «Позже» — сигнал появится в следующей сводке»."""
+    sig_id = _make_signal()
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"sig:{sig_id}:later"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_signal_button(cb, AsyncMock())
+    assert _get_status(sig_id) == SignalStatus.POSTPONED
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    await bot_main.send_digest(bot)
+
+    assert bot.send_message.await_args_list[0].args == (111, "📬 Утренняя сводка: 1 сигналов")
