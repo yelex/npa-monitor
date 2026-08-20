@@ -361,3 +361,108 @@ async def test_cmd_today_ignores_unauthorized_user() -> None:
     await bot_main.cmd_today(message)
 
     message.answer.assert_not_awaited()
+
+
+# --- Регрессии: DetachedInstanceError на .categories после закрытия сессии ---
+
+
+async def test_cmd_today_renders_signal_with_categories_without_crashing() -> None:
+    """Регрессия: db.query(Signal) без selectinload(Signal.categories) — обращение к
+    .categories после закрытия сессии (_send_list) падало с DetachedInstanceError."""
+    _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO])
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_today(message)
+
+    assert message.answer.await_count == 2  # заголовок + карточка
+    assert "ВБД" in message.answer.await_args.args[0]
+
+
+async def test_cmd_pending_renders_signal_with_categories_without_crashing() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.DISABLED])
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_pending(message)
+
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
+    assert "Инвалиды" in message.answer.await_args.args[0]
+
+
+async def test_cmd_history_renders_signal_with_categories_without_crashing() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO])
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_history(message)
+
+    assert "СВО" in message.answer.await_args.args[0]
+
+
+# --- Утренняя сводка (рассылка, PLAN.md Фаза 6) ---
+
+
+def test_seconds_until_next_same_day() -> None:
+    now = bot_main.dt.datetime(2026, 8, 20, 6, 0)  # раньше 08:00
+    assert bot_main._seconds_until_next(8, now=now) == 2 * 3600
+
+
+def test_seconds_until_next_rolls_over_to_tomorrow() -> None:
+    now = bot_main.dt.datetime(2026, 8, 20, 9, 0)  # уже позже 08:00
+    seconds = bot_main._seconds_until_next(8, now=now)
+    assert seconds == 23 * 3600  # 08:00 следующего дня
+
+
+def test_seconds_until_next_exactly_at_target_rolls_over() -> None:
+    now = bot_main.dt.datetime(2026, 8, 20, 8, 0)
+    seconds = bot_main._seconds_until_next(8, now=now)
+    assert seconds == 24 * 3600
+
+
+async def test_send_digest_reports_no_signals_when_empty() -> None:
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main.send_digest(bot)
+
+    bot.send_message.assert_awaited_once_with(111, "Новых сигналов нет.")
+
+
+async def test_send_digest_sends_cards_sorted_by_priority() -> None:
+    high_id = _make_signal(priority=Priority.HIGH, title="Высокий")
+    low_id = _make_signal(priority=Priority.LOW, title="Низкий")
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main.send_digest(bot)
+
+    # первый вызов — заголовок сводки, затем карточки по возрастанию PRIORITY_ORDER
+    calls = bot.send_message.await_args_list
+    assert calls[0].args == (111, "📬 Утренняя сводка: 2 сигналов")
+    assert "Высокий" in calls[1].args[1]
+    assert "Низкий" in calls[2].args[1]
+    assert calls[1].kwargs["reply_markup"].inline_keyboard[0][0].callback_data == f"sig:{high_id}:work"
+    assert calls[2].kwargs["reply_markup"].inline_keyboard[0][0].callback_data == f"sig:{low_id}:work"
+
+
+async def test_send_digest_excludes_signals_in_progress() -> None:
+    """Раздел 10 AGENTS.md: сводка — «Новый»/«Отложен», не «В работе»."""
+    sig_id = _make_in_progress_signal()
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main.send_digest(bot)
+
+    bot.send_message.assert_awaited_once_with(111, "Новых сигналов нет.")
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # не тронут

@@ -19,7 +19,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from config import get_settings
 from db.catalog import all_domains
@@ -133,6 +133,7 @@ async def cmd_today(message: Message) -> None:
     with get_session_factory()() as db:
         signals = (
             db.query(Signal)
+            .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
             .all()
         )
@@ -147,6 +148,7 @@ async def cmd_pending(message: Message) -> None:
     with get_session_factory()() as db:
         signals = (
             db.query(Signal)
+            .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([SignalStatus.IN_PROGRESS, SignalStatus.POSTPONED]))
             .order_by(Signal.created_at)
             .all()
@@ -161,6 +163,7 @@ async def cmd_history(message: Message) -> None:
     with get_session_factory()() as db:
         signals = (
             db.query(Signal)
+            .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([
                 SignalStatus.SENT_TO_AGENT, SignalStatus.COMPLETED, SignalStatus.REJECTED,
             ]))
@@ -245,20 +248,28 @@ async def cmd_complete(message: Message, command: CommandObject) -> None:
 
 
 @router.message(Command("digest"))
+def _digest_signals(db: Session) -> list[Signal]:
+    """Новые + отложенные, отсортированные по приоритету (раздел 10 AGENTS.md).
+    Общая логика для команды /digest и автоматической рассылки (_digest_loop)."""
+    signals = (
+        db.query(Signal)
+        .options(selectinload(Signal.categories))
+        .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
+        .all()
+    )
+    signals.sort(key=lambda s: (PRIORITY_ORDER.get(s.priority, 9), s.created_at))
+    return signals
+
+
 async def cmd_digest(message: Message) -> None:
-    """Утренняя сводка: группировка по приоритету (раздел 10 AGENTS.md)."""
+    """Утренняя сводка по запросу (см. также `_digest_loop` — автоматическая рассылка)."""
     if not is_allowed(message.from_user.id):
         return
     with get_session_factory()() as db:
-        signals = (
-            db.query(Signal)
-            .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
-            .all()
-        )
+        signals = _digest_signals(db)
     if not signals:
         await message.answer("Новых сигналов нет.")
         return
-    signals.sort(key=lambda s: (PRIORITY_ORDER.get(s.priority, 9), s.created_at), reverse=False)
     await message.answer(f"📬 Утренняя сводка: {len(signals)} сигналов")
     for s in signals:
         cats = [c.category.value for c in s.categories] if s.categories else []
@@ -421,6 +432,46 @@ async def _reminder_loop(bot: Bot) -> None:
         await asyncio.sleep(6 * 3600)
 
 
+# --- утренняя сводка (рассылка) -------------------------------------------------
+
+DIGEST_HOUR = 8  # AGENTS.md раздел 5: ~08:00, через ~2ч после обхода парсером (06:00)
+
+
+def _seconds_until_next(hour: int, *, now: dt.datetime | None = None) -> float:
+    """Сколько секунд ждать до следующего наступления `hour:00` локального времени."""
+    now = now or dt.datetime.now()
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += dt.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def send_digest(bot: Bot) -> None:
+    """Рассылает утреннюю сводку всем допущенным экспертам (AGENTS.md раздел 5).
+    Логика подбора/сортировки сигналов — та же, что у команды /digest (`_digest_signals`),
+    но здесь адресат — все `allowed_user_ids`, а не тот, кто вызвал команду."""
+    with get_session_factory()() as db:
+        signals = _digest_signals(db)
+
+    for uid in get_settings().allowed_user_ids:
+        if not signals:
+            await bot.send_message(uid, "Новых сигналов нет.")
+            continue
+        await bot.send_message(uid, f"📬 Утренняя сводка: {len(signals)} сигналов")
+        for s in signals:
+            cats = [c.category.value for c in s.categories] if s.categories else []
+            await bot.send_message(uid, signal_card(s, cats), reply_markup=signal_kb(s.id))
+
+
+async def _digest_loop(bot: Bot) -> None:
+    while True:
+        await asyncio.sleep(_seconds_until_next(DIGEST_HOUR))
+        try:
+            await send_digest(bot)
+        except Exception:  # noqa: BLE001
+            log.exception("digest loop error")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
@@ -430,10 +481,12 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     reminder = asyncio.create_task(_reminder_loop(bot))
+    digest = asyncio.create_task(_digest_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         reminder.cancel()
+        digest.cancel()
 
 
 if __name__ == "__main__":
