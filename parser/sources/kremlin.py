@@ -6,13 +6,13 @@
 """
 from __future__ import annotations
 
-import datetime as dt
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from parser.fetcher import fetch
 from parser.models import Publication
+from parser.sources._dates import parse_iso_moscow
 
 BASE_URL = "http://www.kremlin.ru"
 NEWS_URL = f"{BASE_URL}/acts/news"
@@ -32,10 +32,7 @@ def _parse_news_page(html: str) -> list[Publication]:
         published_at = None
         time_el = entry.select_one('time[itemprop="datePublished"]')
         if time_el is not None and time_el.get("datetime"):
-            try:
-                published_at = dt.datetime.fromisoformat(time_el["datetime"])
-            except ValueError:
-                published_at = None
+            published_at = parse_iso_moscow(time_el["datetime"])
 
         publications.append(
             Publication(

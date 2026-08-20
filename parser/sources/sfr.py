@@ -13,13 +13,13 @@ ISO-датой в `<time datetime=...>`, пагинация `?page=N`.
 """
 from __future__ import annotations
 
-import datetime as dt
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from parser.fetcher import fetch
 from parser.models import Publication
+from parser.sources._dates import parse_iso_moscow
 
 BASE_URL = "https://sfr.gov.ru"
 NEWS_URL = f"{BASE_URL}/press_center/news/"
@@ -39,10 +39,7 @@ def _parse_news_page(html: str) -> list[Publication]:
         published_at = None
         time_el = article.select_one("time.re-news__article-time")
         if time_el is not None and time_el.get("datetime"):
-            try:
-                published_at = dt.datetime.fromisoformat(time_el["datetime"])
-            except ValueError:
-                published_at = None
+            published_at = parse_iso_moscow(time_el["datetime"])
 
         summary_el = article.select_one("p.re-news__article-description")
 

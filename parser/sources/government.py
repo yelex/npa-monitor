@@ -7,13 +7,13 @@ RSNET: HTTPS у этого домена не отвечает (таймаут) �
 """
 from __future__ import annotations
 
-import datetime as dt
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from parser.fetcher import fetch
 from parser.models import Publication
+from parser.sources._dates import parse_iso_moscow
 
 BASE_URL = "http://government.ru"
 DOCS_URL = f"{BASE_URL}/docs/"
@@ -33,10 +33,7 @@ def _parse_docs_page(html: str) -> list[Publication]:
         published_at = None
         time_el = headline.select_one("span.headline_date time")
         if time_el is not None and time_el.get("datetime"):
-            try:
-                published_at = dt.datetime.fromisoformat(time_el["datetime"])
-            except ValueError:
-                published_at = None
+            published_at = parse_iso_moscow(time_el["datetime"])
 
         lead_el = headline.select_one("span.headline_lead")
 

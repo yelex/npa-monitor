@@ -7,6 +7,7 @@ import datetime as dt
 import httpx
 import pytest
 
+from parser.sources._dates import MOSCOW_TZ
 from parser.sources.kremlin import NEWS_URL, SOURCE_KEY, fetch_news
 
 REAL_NEWS_FRAGMENT = """
@@ -43,7 +44,10 @@ def test_fetch_news_parses_real_markup_fragment(monkeypatch: pytest.MonkeyPatch)
     assert pub.source_key == SOURCE_KEY
     assert pub.title == "Указ о награждении государственными наградами"
     assert pub.url == "http://www.kremlin.ru/acts/news/80518"
-    assert pub.published_at == dt.datetime(2026, 8, 12)
+    # Регрессия: 2026-08-12 без смещения на реальной вёрстке kremlin.ru приводило к
+    # naive datetime и падению TypeError при сравнении с tz-aware окном поиска в
+    # orchestrator.py — найдено вживую 2026-08-20 (см. parser/sources/_dates.py).
+    assert pub.published_at == dt.datetime(2026, 8, 12, tzinfo=MOSCOW_TZ)
 
 
 def test_fetch_news_page_2_uses_page_path(monkeypatch: pytest.MonkeyPatch) -> None:
