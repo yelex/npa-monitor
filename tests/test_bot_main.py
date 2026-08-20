@@ -505,6 +505,40 @@ async def test_send_digest_excludes_signals_in_progress() -> None:
     assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # не тронут
 
 
+async def test_cmd_start_answers_with_command_list() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_start(message)
+
+    text = message.answer.await_args.args[0]
+    for command in ("/today", "/pending", "/history", "/stats", "/reopen", "/complete"):
+        assert command in text
+
+
+def test_router_maps_each_command_name_to_matching_handler() -> None:
+    """Регрессия: @router.message(Command("digest")) висел над `_digest_signals`
+    (приватным синхронным helper'ом с сигнатурой (db: Session)), а не над
+    `cmd_digest` — сама команда /digest в реальном Telegram-диспетчере не работала
+    бы, хотя прямой вызов `cmd_digest(message)` в тестах (см. ниже) это не ловил,
+    т.к. обходит router полностью."""
+    from aiogram.filters import Command as CommandFilter
+
+    seen = set()
+    for handler in bot_main.router.message.handlers:
+        for f in handler.filters:
+            if isinstance(f.callback, CommandFilter):
+                for command in f.callback.commands:
+                    assert handler.callback.__name__ == f"cmd_{command}", (
+                        f"/{command} зарегистрирован на {handler.callback.__name__}, "
+                        f"ожидался cmd_{command}"
+                    )
+                    seen.add(command)
+
+    assert seen == {"start", "today", "pending", "history", "stats", "reopen", "complete", "digest"}
+
+
 async def test_cmd_digest_reports_no_signals_when_empty() -> None:
     """AGENTS.md раздел 9: «Нет новых публикаций — бот отправляет «Новых сигналов нет»»."""
     message = MagicMock()

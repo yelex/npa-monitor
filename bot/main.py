@@ -126,6 +126,29 @@ def reject_kb(sig_id: int) -> InlineKeyboardMarkup:
 
 # --- Команды -----------------------------------------------------------------
 
+START_TEXT = (
+    "👋 Мониторинг изменений в НПА по мерам поддержки (ВБД, инвалиды, СВО).\n\n"
+    "Раз в день парсер обходит источники и присылает карточки сигналов о новых/"
+    "изменённых НПА с приоритетом. По каждой карточке: ✅ взять в работу, ❌ отклонить, "
+    "↩️ отложить. Взяв в работу, пришлите ссылку на полный текст НПА — бот проверит "
+    "домен и доступность и передаст её агенту автообновления.\n\n"
+    "Команды:\n"
+    "/today — сигналы «Новый»/«Отложен» за сегодня\n"
+    "/pending — всё «В работе»/«Отложен»\n"
+    "/history — последние 10 из «Передан агенту»/«Завершён»/«Отклонён»\n"
+    "/stats — статистика за 7 дней\n"
+    "/digest — сводка новых и отложенных сигналов по запросу\n"
+    "/reopen <id> — вернуть отклонённый сигнал в «Новый»\n"
+    "/complete <id> — отметить сигнал завершённым после проверки результата агента"
+)
+
+
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    if not is_allowed(message.from_user.id):
+        return
+    await message.answer(START_TEXT)
+
 
 @router.message(Command("today"))
 async def cmd_today(message: Message) -> None:
@@ -249,7 +272,6 @@ async def cmd_complete(message: Message, command: CommandObject) -> None:
     await message.answer(f"✅ Сигнал {sig_id} → Завершён")
 
 
-@router.message(Command("digest"))
 def _digest_signals(db: Session) -> list[Signal]:
     """Новые + отложенные, отсортированные по приоритету (раздел 10 AGENTS.md).
     Общая логика для команды /digest и автоматической рассылки (_digest_loop)."""
@@ -263,6 +285,7 @@ def _digest_signals(db: Session) -> list[Signal]:
     return signals
 
 
+@router.message(Command("digest"))
 async def cmd_digest(message: Message) -> None:
     """Утренняя сводка по запросу (см. также `_digest_loop` — автоматическая рассылка)."""
     if not is_allowed(message.from_user.id):
