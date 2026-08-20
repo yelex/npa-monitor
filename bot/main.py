@@ -212,6 +212,7 @@ async def cmd_reopen(message: Message, command: CommandObject) -> None:
             await message.answer(f"Нельзя: {e}")
             return
         db.commit()
+    log.info("сигнал %s -> Новый (/reopen, user=%s)", sig_id, message.from_user.id)
     await message.answer(f"↩️ Сигнал {sig_id} → Новый")
 
 
@@ -239,6 +240,7 @@ async def cmd_complete(message: Message, command: CommandObject) -> None:
             await message.answer(f"Нельзя: {e}")
             return
         db.commit()
+    log.info("сигнал %s -> Завершён (/complete, user=%s)", sig_id, message.from_user.id)
     await message.answer(f"✅ Сигнал {sig_id} → Завершён")
 
 
@@ -292,6 +294,7 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
         if action == "work":
             transition_status(db, s, SignalStatus.IN_PROGRESS, changed_by=cb.from_user.id)
             db.commit()
+            log.info("сигнал %s -> В работе (user=%s)", sig_id, cb.from_user.id)
             await state.set_state(NpaFlow.ask_npa_link)
             await state.update_data(sig_id=sig_id)
             await cb.message.answer(  # type: ignore[union-attr]
@@ -305,6 +308,7 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
         elif action == "later":
             transition_status(db, s, SignalStatus.POSTPONED, changed_by=cb.from_user.id)
             db.commit()
+            log.info("сигнал %s -> Отложен (user=%s)", sig_id, cb.from_user.id)
             await cb.message.answer("↩️ Отложен — вернётся в следующую сводку.")  # type: ignore[union-attr]
     await cb.answer()
 
@@ -331,6 +335,7 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
                 db, s, SignalStatus.REJECTED, changed_by=cb.from_user.id, rejection_reason=reason
             )
             db.commit()
+            log.info("сигнал %s -> Отклонён: %s (user=%s)", sig_id, reason.value, cb.from_user.id)
     await state.clear()
     await cb.message.edit_text(  # type: ignore[union-attr]
         f"❌ Сигнал {sig_id} отклонён: {REJECT_REASONS[code]}"
