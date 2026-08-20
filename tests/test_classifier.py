@@ -16,7 +16,10 @@ CLASSIFIER = Classifier.load()
 
 
 def _publication(source_key: str, title: str) -> Publication:
-    return Publication(source_key=source_key, title=title, url="https://example.test/1", published_at=None)
+    # url строится из source_key (не независимая фикстура) — detect_region берёт домен
+    # из url, а не из source_key (см. parser/classifier.py::detect_region), и все
+    # source_key в этом файле уже имеют вид "домен" или "домен/путь".
+    return Publication(source_key=source_key, title=title, url=f"https://{source_key}", published_at=None)
 
 
 # --- По каждой ЖС ---

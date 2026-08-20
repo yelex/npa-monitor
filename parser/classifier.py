@@ -39,6 +39,7 @@ from db.catalog import (
     load_sources,
 )
 from db.enums import EventType, Priority, Region, SignalCategory
+from parser.filters import domain_of
 from parser.models import Publication
 from parser.ru_stem import contains_keyword, find_matches
 
@@ -137,16 +138,28 @@ def detect_region(
 ) -> Region:
     """AGENTS.md раздел 4.1: домен источника → «РФ» для федеральных → «Не определён».
 
+    Домен берётся из `publication.url` (`parser/filters.py::domain_of`), не из
+    `source_key`. **Исправлено 2026-08-20** — раньше матчился первый сегмент
+    `source_key` до `/`, что случайно совпадало с доменом только для листинговых
+    источников (там `source_key` по соглашению начинается с домена,
+    `parser/sources/*.py::SOURCE_KEY`); для источников, где `source_key` — не URL
+    (`yandex_search:<id>` у поиска через Yandex, `parser/discovery_search.py`), регион
+    получался «Не определён» всегда. Найдено вживую: все 30+ сигналов от Yandex Search
+    показывали `region: undefined`, включая публикации с `sfr.gov.ru` — федерального
+    домена, для которого регион должен определяться как «РФ».
+
     Текстовое уточнение (раздел 4.1: «регион может уточняться по тексту публикации») не
     реализовано: пока в справочнике всего 2 региона (Москва + РФ, AGENTS.md раздел 1),
-    источник однозначно определяет регион без разбора текста — добавить при расширении
-    за пределы MVP (AGENTS.md раздел 16, пункт 12).
+    домен однозначно определяет регион без разбора текста — добавить при расширении за
+    пределы MVP (AGENTS.md раздел 16, пункт 12).
     """
-    source_domain = publication.source_key.split("/", 1)[0]
+    host = domain_of(publication.url)
     for region_entry in regions:
-        if any(source.domain == source_domain for source in region_entry.sources):
+        if any(
+            host == source.domain or host.endswith(f".{source.domain}") for source in region_entry.sources
+        ):
             return region_entry.region
-    if source_domain in federal_domains:
+    if any(host == domain or host.endswith(f".{domain}") for domain in federal_domains):
         return Region.RF
     return Region.UNDEFINED
 

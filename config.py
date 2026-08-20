@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     glm_personal_base_url: str = "https://api.z.ai/api/coding/paas/v4"
     glm_personal_model: str = "glm-5.1"
 
+    # Yandex Cloud Search API (ретроспективный поиск, docs/SPEC_yandex_search_discovery.md)
+    yandex_search_api_key: str = ""
+    yandex_search_folder_id: str = ""
+
     @property
     def allowed_user_ids(self) -> set[int]:
         if not self.allowed_telegram_user_ids.strip():
