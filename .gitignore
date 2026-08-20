@@ -18,3 +18,6 @@ build/
 
 # Ralph loop
 ralph_logs/
+
+# macOS
+.DS_Store
