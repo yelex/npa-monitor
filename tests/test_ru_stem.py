@@ -47,3 +47,18 @@ def test_words_must_stay_adjacent_and_ordered() -> None:
 
 def test_unrelated_text_does_not_match() -> None:
     assert contains_keyword("сегодня хорошая погода, дует ветер", ("ветеран боевых действий",)) is False
+
+
+def test_dobrovolec_does_not_match_unrelated_dobrovolny() -> None:
+    """Регрессия, найдена вживую 2026-08-20: обрезка «доброволец» до «добровол»
+    матчилась на «добровольное страхование»/«добровольного пенсионного страхования»
+    — частые фразы, не связанные с участниками СВО. См. докстринг модуля."""
+    assert contains_keyword("участники эксперимента по добровольному страхованию", ("доброволец",)) is False
+    assert (
+        contains_keyword("вопросы добровольного пенсионного страхования самозанятых", ("доброволец",))
+        is False
+    )
+
+
+def test_dobrovolec_exact_form_still_matches() -> None:
+    assert contains_keyword("доброволец подписал контракт", ("доброволец",)) is True
