@@ -20,6 +20,10 @@ MVP — детерминированные keyword-правила, без LLM в
   «аналитика, обзор... без указания на конкретный документ»). Регион «Не определён» —
   принудительно средний приоритет (раздел 4.1), даже если остальные признаки указывали
   бы на высокий.
+
+Сопоставление ключевых слов — через `parser/ru_stem.py` (допуск на падежные/числовые
+словоформы, не точная подстрока) — см. докстринг того модуля: точное совпадение
+пропускало реальные релевантные публикации (проверено вживую 2026-08-20).
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ from db.catalog import (
 )
 from db.enums import EventType, Priority, Region, SignalCategory
 from parser.models import Publication
+from parser.ru_stem import contains_keyword
 
 # Порядок проверки типов событий: более специфичные сигналы (отмена, вступление в силу)
 # проверяются раньше общего «изменение», чтобы не перекрывались.
@@ -57,7 +62,7 @@ class ClassificationResult:
 
 
 def _contains_any(text_lower: str, keywords: tuple[str, ...]) -> bool:
-    return any(keyword.lower() in text_lower for keyword in keywords)
+    return contains_keyword(text_lower, keywords)
 
 
 def _publication_text(publication: Publication) -> str:
