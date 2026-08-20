@@ -172,6 +172,25 @@ def test_process_source_marks_unavailable_source_without_processing(
     assert result.error is not None
 
 
+def test_process_source_catches_unexpected_errors_not_just_source_unavailable(
+    session: Session, classifier: Classifier
+) -> None:
+    """Регрессия: неверная конфигурация (напр. отсутствующий RU_PROXY_URL — ValueError
+    из parser/fetcher.py, не SourceUnavailable) роняла весь суточный прогон целиком,
+    обнаружено вживую при первом прогоне `python -m parser`."""
+
+    def fetch_page(page: int = 1):
+        raise ValueError("access='ru_proxy' требует RU_PROXY_URL")
+
+    spec = SourceSpec("publication.pravo.gov.ru", fetch_page)
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.ok is False
+    assert "RU_PROXY_URL" in result.error
+
+
 def test_run_all_continues_after_one_source_fails(session: Session) -> None:
     def failing(page: int = 1):
         raise SourceUnavailable(url="x", access="direct", last_error=Exception())

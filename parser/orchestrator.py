@@ -126,6 +126,14 @@ def process_source(
         # (доверстывание, parser/state.py).
         log.warning("источник недоступен, пропуск до следующего цикла: %s", exc)
         return SourceRunResult(source_key=spec.source_key, ok=False, error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        # Любая другая ошибка одного источника (неверная конфигурация вроде отсутствующего
+        # RU_PROXY_URL, баг в парсинге конкретного адаптера и т.п.) не должна ронять весь
+        # суточный прогон — обнаружено вживую: неверно настроенный RU_PROXY_URL для
+        # pravo_gov прерывал обход всех источников после него. С полным traceback в лог
+        # (не как SourceUnavailable — это неожиданная ошибка, а не штатный «сайт лежит»).
+        log.exception("неожиданная ошибка при обходе источника %s, пропуск", spec.source_key)
+        return SourceRunResult(source_key=spec.source_key, ok=False, error=str(exc))
 
     mark_source_processed(session, spec.source_key, success_at=now)
     return result
