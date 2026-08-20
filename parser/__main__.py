@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 
+from config import get_settings
 from db.session import init_db, make_engine, make_session_factory
 from parser.orchestrator import run_all
 
@@ -36,8 +36,12 @@ def main() -> None:
         # как парсер принимает решение").
         logging.getLogger("parser").setLevel(logging.DEBUG)
 
-    db_path = os.getenv("DATABASE_PATH", "data/npa_monitor.db")
-    ru_proxy_url = os.getenv("RU_PROXY_URL") or None
+    # config.get_settings() (не голый os.getenv) — иначе .env не читается сам по себе:
+    # для этого нужен pydantic-settings с env_file=".env", как у bot/main.py. Баг найден
+    # вживую: RU_PROXY_URL из .env не подхватывался, требовал ручного export в shell.
+    settings = get_settings()
+    db_path = settings.database_path
+    ru_proxy_url = settings.ru_proxy_url or None
 
     engine = make_engine(db_path)
     init_db(engine)
