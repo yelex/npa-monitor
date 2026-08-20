@@ -202,6 +202,80 @@ async def test_cmd_stats_does_not_crash_on_tz_comparison() -> None:
     message.answer.assert_awaited_once()
 
 
+# --- /reopen и /complete ---
+
+
+async def test_cmd_reopen_returns_rejected_signal_to_new() -> None:
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.enums import RejectionReason
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.REJECTED, rejection_reason=RejectionReason.OTHER)
+        session.commit()
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = str(sig_id)
+
+    await bot_main.cmd_reopen(message, command)
+
+    assert _get_status(sig_id) == SignalStatus.NEW
+
+
+async def test_cmd_reopen_rejects_non_numeric_args() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = "abc"
+
+    await bot_main.cmd_reopen(message, command)
+
+    assert "Формат" in message.answer.await_args.args[0]
+
+
+async def test_cmd_complete_transitions_sent_to_agent_to_completed() -> None:
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.IN_PROGRESS)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = str(sig_id)
+
+    await bot_main.cmd_complete(message, command)
+
+    assert _get_status(sig_id) == SignalStatus.COMPLETED
+
+
+async def test_cmd_complete_rejects_invalid_transition_from_new() -> None:
+    """Новый -> Завершён не разрешён — команда должна сообщить об ошибке, не падать."""
+    sig_id = _make_signal()
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = str(sig_id)
+
+    await bot_main.cmd_complete(message, command)
+
+    assert _get_status(sig_id) == SignalStatus.NEW
+    assert "Нельзя" in message.answer.await_args.args[0]
+
+
 # --- Доступ ---
 
 

@@ -215,6 +215,33 @@ async def cmd_reopen(message: Message, command: CommandObject) -> None:
     await message.answer(f"↩️ Сигнал {sig_id} → Новый")
 
 
+@router.message(Command("complete"))
+async def cmd_complete(message: Message, command: CommandObject) -> None:
+    """Передан агенту -> Завершён, AGENTS.md раздел 6: «Эксперт проверил результат
+    агента». Ручная команда, а не автоматический переход — AutoUpdateAgentClient
+    (PLAN.md Фаза 5) пока не подключён к реальному агенту (см. AGENTS.md раздел 16
+    п.8), автоматического сигнала «агент ответил» нет."""
+    if not is_allowed(message.from_user.id):
+        return
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Формат: /complete <id>")
+        return
+    sig_id = int(command.args.strip())
+    db_factory = get_session_factory()
+    with db_factory() as db:
+        s = db.get(Signal, sig_id)
+        if not s:
+            await message.answer(f"Сигнал {sig_id} не найден.")
+            return
+        try:
+            transition_status(db, s, SignalStatus.COMPLETED, changed_by=message.from_user.id)
+        except Exception as e:  # noqa: BLE001
+            await message.answer(f"Нельзя: {e}")
+            return
+        db.commit()
+    await message.answer(f"✅ Сигнал {sig_id} → Завершён")
+
+
 @router.message(Command("digest"))
 async def cmd_digest(message: Message) -> None:
     """Утренняя сводка: группировка по приоритету (раздел 10 AGENTS.md)."""
