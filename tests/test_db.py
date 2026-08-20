@@ -90,6 +90,29 @@ def test_postponed_returns_to_in_progress(session: Session):
     assert signal.status == SignalStatus.IN_PROGRESS
 
 
+def test_new_can_be_postponed_directly(session: Session):
+    """AGENTS.md раздел 6, таблица переходов: Новый -> Отложен (↩️ Позже)."""
+    signal = _make_signal(session)
+
+    transition_status(session, signal, SignalStatus.POSTPONED)
+    session.commit()
+
+    assert signal.status == SignalStatus.POSTPONED
+
+
+def test_postponed_can_be_rejected(session: Session):
+    """AGENTS.md раздел 6, таблица переходов: Отложен -> Отклонён (❌ Отклонить)."""
+    signal = _make_signal(session)
+    transition_status(session, signal, SignalStatus.POSTPONED)
+
+    transition_status(
+        session, signal, SignalStatus.REJECTED, rejection_reason=RejectionReason.OTHER
+    )
+    session.commit()
+
+    assert signal.status == SignalStatus.REJECTED
+
+
 def test_invalid_transition_new_to_completed_raises(session: Session):
     signal = _make_signal(session)
 

@@ -21,11 +21,13 @@ from db.models import DocumentSeen, Signal, SignalCategoryLink, SourceState, Sta
 # - Отклонён -> Новый (повторное открытие, PLAN.md п.5.5, /reopen)
 # - Завершён — конечный статус, переходов из него нет.
 ALLOWED_TRANSITIONS: dict[SignalStatus, frozenset[SignalStatus]] = {
-    SignalStatus.NEW: frozenset({SignalStatus.IN_PROGRESS, SignalStatus.REJECTED}),
+    SignalStatus.NEW: frozenset(
+        {SignalStatus.IN_PROGRESS, SignalStatus.REJECTED, SignalStatus.POSTPONED}
+    ),
     SignalStatus.IN_PROGRESS: frozenset(
         {SignalStatus.POSTPONED, SignalStatus.REJECTED, SignalStatus.SENT_TO_AGENT}
     ),
-    SignalStatus.POSTPONED: frozenset({SignalStatus.IN_PROGRESS}),
+    SignalStatus.POSTPONED: frozenset({SignalStatus.IN_PROGRESS, SignalStatus.REJECTED}),
     SignalStatus.SENT_TO_AGENT: frozenset({SignalStatus.COMPLETED}),
     SignalStatus.REJECTED: frozenset({SignalStatus.NEW}),
     SignalStatus.COMPLETED: frozenset(),
