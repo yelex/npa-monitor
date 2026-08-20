@@ -1,0 +1,27 @@
+# PLAN.md Фаза 7. Один образ (Dockerfile), два сервиса — bot (постоянно работает) и
+# parser (одноразовый прогон, планируется извне через cron/systemd timer на хосте, не
+# запускается автоматически с `docker compose up`, см. profiles ниже и README раздел
+# «Деплой»).
+services:
+  bot:
+    build: .
+    image: npa-monitor:latest
+    command: ["python", "-m", "bot"]
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - npa_data:/app/data
+
+  parser:
+    build: .
+    image: npa-monitor:latest
+    command: ["python", "-m", "parser"]
+    env_file: .env
+    volumes:
+      - npa_data:/app/data
+    # profiles: сервис не стартует с `docker compose up` (не демон — один прогон и
+    # выход); запускается явно: `docker compose run --rm parser` из cron на хосте.
+    profiles: ["cron"]
+
+volumes:
+  npa_data:

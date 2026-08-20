@@ -34,6 +34,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["db", "parser", "parser.sources", "bot"]
+py-modules = ["config"]
 
 [tool.ruff]
 line-length = 110

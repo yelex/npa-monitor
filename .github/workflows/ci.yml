@@ -17,3 +17,20 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t npa-monitor:ci .
+      # Смоук-тест: без TELEGRAM_BOT_TOKEN бот обязан упасть с понятной ошибкой на
+      # старте, а не молча зависнуть/упасть с трассировкой импорта (PLAN.md Фаза 7).
+      - run: |
+          set +e
+          output=$(docker run --rm npa-monitor:ci python -m bot 2>&1)
+          status=$?
+          echo "$output"
+          if [ "$status" -eq 0 ] || ! echo "$output" | grep -q "TELEGRAM_BOT_TOKEN не задан"; then
+            echo "::error::ожидали понятную ошибку про TELEGRAM_BOT_TOKEN, получили другое"
+            exit 1
+          fi
