@@ -21,6 +21,7 @@ from aiogram.types import (
 )
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
+from bot.autoupdate_client import AutoUpdateAgentClient
 from config import get_settings
 from db.catalog import all_domains
 from db.enums import Priority, RejectionReason, SignalStatus
@@ -35,6 +36,7 @@ log = logging.getLogger("bot")
 router = Router()
 
 _session_factory: sessionmaker[Session] | None = None
+_autoupdate_client = AutoUpdateAgentClient()
 
 
 def get_session_factory() -> sessionmaker[Session]:
@@ -399,7 +401,7 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
             s.npa_link = npa_link
         transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=message.from_user.id)
         db.commit()
-        # TODO Фаза 5: AutoUpdateAgentClient.send(npa_link, measure_id) — заглушка (PLAN.md BLOCKED)
+        _autoupdate_client.send(s.npa_link, s.measure_id)
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
 
     await message.answer("✅ Ссылка принята. Статус: Передан агенту.")

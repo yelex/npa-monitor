@@ -84,6 +84,34 @@ def test_new_life_situation_picked_up_without_code_change(tmp_path: Path) -> Non
     assert situations[0].category == SignalCategory.VETERANS
 
 
+def test_new_region_source_picked_up_without_code_change(tmp_path: Path) -> None:
+    """Симметрично test_new_life_situation_picked_up_without_code_change, но для
+    региона: тот же честный охват — новый источник для уже существующего региона
+    (code) подхватывается из YAML без кода; совершенно новый субъект РФ (не значение
+    Region enum) — по-прежнему требует правки db/enums.py (см. data/regions.yaml
+    докстринг, AGENTS.md раздел 16 п.12)."""
+    custom_path = tmp_path / "regions.yaml"
+    custom_path.write_text(
+        textwrap.dedent(
+            """
+            - code: moscow
+              name: Москва
+              sources:
+                - domain: newly-added-source.mos.ru
+                  url: https://newly-added-source.mos.ru/docs/
+                  access: direct
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    regions = load_regions(custom_path)
+
+    assert len(regions) == 1
+    assert regions[0].region == Region.MOSCOW
+    assert [s.domain for s in regions[0].sources] == ["newly-added-source.mos.ru"]
+
+
 def test_unknown_life_situation_id_raises_catalog_error(tmp_path: Path) -> None:
     custom_path = tmp_path / "life_situations.yaml"
     custom_path.write_text(

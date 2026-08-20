@@ -11,6 +11,7 @@ reason= вместо rejection_reason=, naive datetime.now() против tz-awa
 """
 from __future__ import annotations
 
+import datetime as dt
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -191,15 +192,46 @@ async def test_remind_stale_does_not_crash_on_tz_comparison() -> None:
     await bot_main.remind_stale(bot)  # не должно поднимать исключение
 
 
-async def test_cmd_stats_does_not_crash_on_tz_comparison() -> None:
-    _make_signal()
+async def test_remind_stale_reminds_for_signal_stuck_over_3_days_in_progress() -> None:
+    """AGENTS.md раздел 12: сигнал >3 дней в «В работе» -> напоминание."""
+    sig_id = _make_in_progress_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        signal.updated_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=4)
+        session.commit()
+    bot = AsyncMock()
+
+    await bot_main.remind_stale(bot)
+
+    bot.send_message.assert_awaited_once()
+    uid, text = bot.send_message.await_args.args
+    assert uid == 111
+    assert str(sig_id) in text
+
+
+async def test_remind_stale_skips_signal_updated_recently() -> None:
+    _make_in_progress_signal()  # updated_at ~ сейчас, порог не пройден
+
+    bot = AsyncMock()
+    await bot_main.remind_stale(bot)
+
+    bot.send_message.assert_not_awaited()
+
+
+async def test_cmd_stats_reports_counts_by_status_for_real_signals() -> None:
+    _make_signal()  # статус «Новый»
+    _make_in_progress_signal()
     message = MagicMock()
     message.from_user.id = 111
     message.answer = AsyncMock()
 
     await bot_main.cmd_stats(message)
 
-    message.answer.assert_awaited_once()
+    text = message.answer.await_args.args[0]
+    assert "2 сигнал" in text
+    assert "Новый: 1" in text
+    assert "В работе: 1" in text
 
 
 # --- /reopen и /complete ---
@@ -338,6 +370,8 @@ async def test_on_npa_link_rejects_unreachable_link(monkeypatch) -> None:
 async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> None:
     sig_id = _make_in_progress_signal()
     monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
+    sent = MagicMock()
+    monkeypatch.setattr(bot_main._autoupdate_client, "send", sent)
     state = AsyncMock()
     state.get_data = AsyncMock(return_value={"sig_id": sig_id})
     message = MagicMock()
@@ -351,6 +385,9 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     factory = bot_main.get_session_factory()
     with factory() as session:
         assert session.get(bot_main.Signal, sig_id).npa_link == "https://sfr.gov.ru/document/1"
+    # AGENTS.md раздел 15: «бот передаёт ссылку и measureId агенту через адаптер» —
+    # адаптер (пусть и заглушка) обязан быть вызван с итоговой ссылкой и measure_id.
+    sent.assert_called_once_with("https://sfr.gov.ru/document/1", None)
 
 
 async def test_cmd_today_ignores_unauthorized_user() -> None:
