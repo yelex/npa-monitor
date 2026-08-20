@@ -105,6 +105,54 @@ def test_reject_kb_has_four_reason_buttons() -> None:
     assert all(b.callback_data.startswith("rej:7:") for b in all_buttons)
 
 
+def test_signal_card_escapes_html_special_characters() -> None:
+    """`parse_mode=HTML` включён глобально (main()) — заголовок/ссылка приходят из
+    реального веб-контента (листинги, Yandex Search) и могут содержать `&`/`<`/`>`
+    (например, URL с query-параметрами `...?a=1&b=2`) — без экранирования Telegram
+    не смог бы разобрать сообщение (`can't parse entities`)."""
+    sig_id = _make_signal(
+        title="Приказ №5 & <важно>",
+        source_url="https://example.test/doc?a=1&b=2",
+    )
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        card = bot_main.signal_card(signal, [])
+
+    assert "<важно>" not in card
+    assert "&lt;важно&gt;" in card
+    assert "doc?a=1&amp;b=2" in card
+
+
+def test_priority_filter_kb_marks_active_option() -> None:
+    kb = bot_main.priority_filter_kb("pending", "high")
+    buttons = kb.inline_keyboard[0]
+    assert [b.callback_data for b in buttons] == [
+        "filter:pending:all", "filter:pending:high", "filter:pending:medium", "filter:pending:low"
+    ]
+    assert buttons[1].text == "[🔴]"
+    assert buttons[0].text == "Все"  # неактивная кнопка — без пометки
+
+
+def test_apply_priority_filter_keeps_only_matching_priority() -> None:
+    high_id = _make_signal(priority=Priority.HIGH)
+    _make_signal(priority=Priority.LOW)
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signals = session.query(bot_main.Signal).all()
+        filtered = bot_main.apply_priority_filter(signals, "high")
+    assert [s.id for s in filtered] == [high_id]
+
+
+def test_apply_priority_filter_all_returns_unchanged() -> None:
+    _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signals = session.query(bot_main.Signal).all()
+        filtered = bot_main.apply_priority_filter(signals, "all")
+    assert filtered == signals
+
+
 # --- Регрессии: переходы статусов ---
 
 
@@ -138,6 +186,56 @@ async def test_on_signal_button_work_starts_npa_link_flow() -> None:
     state.set_state.assert_awaited_once_with(bot_main.NpaFlow.ask_npa_link)
 
 
+async def test_on_signal_button_work_shows_alert_instead_of_crashing_when_already_in_progress() -> None:
+    """Найдено вживую (после добавления второго эксперта в whitelist): двойное нажатие
+    «Взять в работу» (или гонка двух экспертов) роняло `InvalidStatusTransition`
+    необработанным — апдейт падал в логе, эксперт не получал вообще никакого ответа."""
+    sig_id = _make_in_progress_signal()
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"sig:{sig_id}:work"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+    state = AsyncMock()
+
+    await bot_main.on_signal_button(cb, state)
+
+    cb.answer.assert_awaited_once()
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # статус не тронут
+
+
+async def test_on_priority_filter_edits_header_and_sends_only_matching_priority() -> None:
+    _make_signal(priority=Priority.HIGH, title="Высокий")
+    _make_signal(priority=Priority.LOW, title="Низкий")
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = "filter:today:high"
+    cb.message.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_priority_filter(cb)
+
+    header_text = cb.message.edit_text.await_args.args[0]
+    header_kwargs = cb.message.edit_text.await_args.kwargs
+    assert "1" in header_text  # ровно один сигнал с приоритетом "высокий"
+    assert header_kwargs["reply_markup"].inline_keyboard[0][1].text == "[🔴]"
+    cb.message.answer.assert_awaited_once()
+    assert "Высокий" in cb.message.answer.await_args.args[0]
+
+
+async def test_on_priority_filter_ignores_unauthorized_user() -> None:
+    cb = MagicMock()
+    cb.from_user.id = 999
+    cb.data = "filter:today:high"
+    cb.answer = AsyncMock()
+
+    await bot_main.on_priority_filter(cb)
+
+    cb.answer.assert_awaited_once_with("Нет доступа", show_alert=True)
+
+
 async def test_on_reject_reason_sets_rejection_reason_field() -> None:
     """Регрессия: раньше передавался `reason=`, а не `rejection_reason=` —
     transition_status падал с ValueError «требует причины»."""
@@ -156,6 +254,29 @@ async def test_on_reject_reason_sets_rejection_reason_field() -> None:
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
         assert signal.rejection_reason == RejectionReason.DUPLICATE
+
+
+async def test_on_reject_reason_shows_alert_instead_of_crashing_when_already_rejected() -> None:
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.REJECTED, rejection_reason=RejectionReason.OTHER)
+        session.commit()
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"rej:{sig_id}:r_dup"
+    cb.message.edit_text = AsyncMock()
+    cb.answer = AsyncMock()
+    state = AsyncMock()
+
+    await bot_main.on_reject_reason(cb, state)
+
+    cb.answer.assert_awaited_once()
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
+    cb.message.edit_text.assert_not_awaited()  # не перезаписали текст карточки
 
 
 async def test_postponed_signal_can_be_rejected_via_reject_flow() -> None:
@@ -390,6 +511,32 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     sent.assert_called_once_with("https://sfr.gov.ru/document/1", None)
 
 
+async def test_on_npa_link_shows_message_instead_of_crashing_when_already_sent_to_agent(
+    monkeypatch,
+) -> None:
+    sig_id = _make_in_progress_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+    monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
+    state = AsyncMock()
+    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
+    message = MagicMock()
+    message.from_user.id = 111
+    message.text = "https://sfr.gov.ru/document/1"
+    message.answer = AsyncMock()
+
+    await bot_main.on_npa_link(message, state)
+
+    message.answer.assert_awaited_once()
+    assert "уже в статусе" in message.answer.await_args.args[0]
+    state.clear.assert_awaited_once()
+
+
 async def test_cmd_today_ignores_unauthorized_user() -> None:
     message = MagicMock()
     message.from_user.id = 999  # не в ALLOWED_TELEGRAM_USER_IDS
@@ -403,9 +550,12 @@ async def test_cmd_today_ignores_unauthorized_user() -> None:
 # --- Регрессии: DetachedInstanceError на .categories после закрытия сессии ---
 
 
-async def test_cmd_today_renders_signal_with_categories_without_crashing() -> None:
-    """Регрессия: db.query(Signal) без selectinload(Signal.categories) — обращение к
-    .categories после закрытия сессии (_send_list) падало с DetachedInstanceError."""
+async def test_cmd_today_shows_only_header_until_filter_chosen() -> None:
+    """UX-фикс, запрошенный пользователем вживую: `/today` раньше сразу выгружал все
+    карточки отдельными сообщениями, даже без выбора фильтра — неудобно, когда
+    сигналов десятки (после подключения Yandex Search, см. SPEC раздел 5). Теперь
+    команда показывает только заголовок с кнопками; карточки — только по клику
+    (см. `test_on_priority_filter_*` ниже)."""
     _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO])
     message = MagicMock()
     message.from_user.id = 111
@@ -413,11 +563,13 @@ async def test_cmd_today_renders_signal_with_categories_without_crashing() -> No
 
     await bot_main.cmd_today(message)
 
-    assert message.answer.await_count == 2  # заголовок + карточка
-    assert "ВБД" in message.answer.await_args.args[0]
+    assert message.answer.await_count == 1  # только заголовок, без карточек
+    header_call = message.answer.await_args
+    buttons = header_call.kwargs["reply_markup"].inline_keyboard[0]
+    assert [b.callback_data for b in buttons][:2] == ["filter:today:all", "filter:today:high"]
 
 
-async def test_cmd_pending_renders_signal_with_categories_without_crashing() -> None:
+async def test_cmd_pending_shows_only_header_until_filter_chosen() -> None:
     sig_id = _make_in_progress_signal(categories=[SignalCategory.DISABLED])
     message = MagicMock()
     message.from_user.id = 111
@@ -426,10 +578,10 @@ async def test_cmd_pending_renders_signal_with_categories_without_crashing() -> 
     await bot_main.cmd_pending(message)
 
     assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
-    assert "Инвалиды" in message.answer.await_args.args[0]
+    assert message.answer.await_count == 1
 
 
-async def test_cmd_history_renders_signal_with_categories_without_crashing() -> None:
+async def test_cmd_history_shows_only_header_until_filter_chosen() -> None:
     sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO])
     factory = bot_main.get_session_factory()
     with factory() as session:
@@ -444,7 +596,59 @@ async def test_cmd_history_renders_signal_with_categories_without_crashing() -> 
 
     await bot_main.cmd_history(message)
 
-    assert "СВО" in message.answer.await_args.args[0]
+    assert message.answer.await_count == 1
+
+
+async def test_on_priority_filter_all_renders_signal_with_categories_without_crashing() -> None:
+    """Регрессия (перенесена сюда после переноса рендеринга карточек из `/today` в
+    кнопку «Все», см. выше): db.query(Signal) без selectinload(Signal.categories) —
+    обращение к .categories после закрытия сессии падало с DetachedInstanceError."""
+    _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO])
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = "filter:today:all"
+    cb.message.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_priority_filter(cb)
+
+    assert "ВБД" in cb.message.answer.await_args.args[0]
+
+
+async def test_on_priority_filter_all_renders_pending_signal_with_categories() -> None:
+    _make_in_progress_signal(categories=[SignalCategory.DISABLED])
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = "filter:pending:all"
+    cb.message.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_priority_filter(cb)
+
+    assert "Инвалиды" in cb.message.answer.await_args.args[0]
+
+
+async def test_on_priority_filter_all_renders_history_signal_with_categories() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO])
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = "filter:history:all"
+    cb.message.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_priority_filter(cb)
+
+    assert "СВО" in cb.message.answer.await_args.args[0]
 
 
 # --- Утренняя сводка (рассылка, PLAN.md Фаза 6) ---
@@ -515,6 +719,41 @@ async def test_cmd_start_answers_with_command_list() -> None:
     text = message.answer.await_args.args[0]
     for command in ("/today", "/pending", "/history", "/stats", "/reopen", "/complete"):
         assert command in text
+
+
+def test_start_text_has_no_stray_angle_brackets() -> None:
+    """Регрессия, найденная вживую: `parse_mode=HTML` включён глобально (main()), а
+    START_TEXT содержал буквальный `/reopen <id>` — Telegram воспринял `<id>` как
+    незнакомый HTML-тег и отклонил всё сообщение целиком
+    (`TelegramBadRequest: can't parse entities: Unsupported start tag "id"`), /start
+    падал у любого пользователя. START_TEXT — plain text, без намеренной HTML-разметки
+    (в отличие от signal_card, где `<b>` — осознанные теги), поэтому в нём вообще не
+    должно быть `<`."""
+    assert "<" not in bot_main.START_TEXT
+
+
+async def test_cmd_reopen_format_hint_has_no_stray_angle_brackets() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = None
+
+    await bot_main.cmd_reopen(message, command)
+
+    assert "<" not in message.answer.await_args.args[0]
+
+
+async def test_cmd_complete_format_hint_has_no_stray_angle_brackets() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = None
+
+    await bot_main.cmd_complete(message, command)
+
+    assert "<" not in message.answer.await_args.args[0]
 
 
 def test_router_maps_each_command_name_to_matching_handler() -> None:

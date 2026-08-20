@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import html
 import logging
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -26,7 +29,7 @@ from config import get_settings
 from db.catalog import all_domains
 from db.enums import Priority, RejectionReason, SignalStatus
 from db.models import Signal
-from db.service import transition_status
+from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.fetcher import SourceUnavailable, fetch
 from parser.filters import is_domain_whitelisted
@@ -94,16 +97,23 @@ def is_allowed(user_id: int) -> bool:
 
 
 def signal_card(s: Signal, categories: list[str]) -> str:
+    """Заголовок и ссылка — из реального веб-контента (листинги, Yandex Search), не
+    контролируются нами: экранируем через `html.escape` перед вставкой в HTML-разметку
+    Telegram (`parse_mode=HTML`, см. `main()`) — иначе `&` в URL с query-параметрами
+    (например, `...html?&pdf_file=y`, реальный случай) или `<`/`>` в заголовке ломают
+    разбор всего сообщения на стороне Telegram (`can't parse entities`)."""
     cats = ", ".join(CATEGORY_LABELS.get(c, c) for c in categories) or "—"
+    title = html.escape(s.title or "(без названия)", quote=False)
+    source_url = html.escape(s.source_url, quote=False) if s.source_url else ""
     lines = [
         f"🆔 <b>{s.id}</b> · {PRIORITY_LABELS.get(s.priority, s.priority)}",
-        f"<b>{s.title or '(без названия)'}</b>",
+        f"<b>{title}</b>",
         f"ЖС: {cats}",
         f"Тип: {EVENT_LABELS.get(s.event_type.value if s.event_type else '', s.event_type or '—')}",
         f"Регион: {REGION_LABELS.get(s.region.value if s.region else '', s.region or '—')}",
         f"Статус: {STATUS_LABELS.get(s.status, s.status)}",
         f"Дата: {s.created_at:%d.%m.%Y %H:%M}",
-        f"🔗 {s.source_url}" if s.source_url else "",
+        f"🔗 {source_url}" if source_url else "",
     ]
     return "\n".join(x for x in lines if x)
 
@@ -124,6 +134,34 @@ def reject_kb(sig_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[row[:2], row[2:]])
 
 
+# Порядок и коды сортировки/фильтра по приоритету в кнопках под списком сигналов
+# (пользовательский запрос: «возможность сортировки Высокий/средний/низкий из
+# интерфейса бота»). "all" — без фильтра, в исходном порядке команды.
+PRIORITY_FILTER_OPTIONS = (("all", "Все"), ("high", "🔴"), ("medium", "🟡"), ("low", "🟢"))
+_PRIORITY_BY_FILTER_CODE = {"high": Priority.HIGH, "medium": Priority.MEDIUM, "low": Priority.LOW}
+
+
+def priority_filter_kb(list_kind: str, active_code: str) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(
+            text=f"[{label}]" if code == active_code else label,
+            callback_data=f"filter:{list_kind}:{code}",
+        )
+        for code, label in PRIORITY_FILTER_OPTIONS
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
+def apply_priority_filter(signals: list[Signal], code: str) -> list[Signal]:
+    """`code="all"` — без фильтра, порядок не меняется. Иначе — только сигналы с этим
+    приоритетом, отсортированные (внутри одного приоритета сортировка не нужна, но
+    сохраняем стабильный порядок по дате создания — предсказуемее для эксперта)."""
+    if code == "all":
+        return signals
+    wanted = _PRIORITY_BY_FILTER_CODE[code]
+    return sorted((s for s in signals if s.priority == wanted), key=lambda s: s.created_at)
+
+
 # --- Команды -----------------------------------------------------------------
 
 START_TEXT = (
@@ -138,8 +176,8 @@ START_TEXT = (
     "/history — последние 10 из «Передан агенту»/«Завершён»/«Отклонён»\n"
     "/stats — статистика за 7 дней\n"
     "/digest — сводка новых и отложенных сигналов по запросу\n"
-    "/reopen <id> — вернуть отклонённый сигнал в «Новый»\n"
-    "/complete <id> — отметить сигнал завершённым после проверки результата агента"
+    "/reopen ID — вернуть отклонённый сигнал в «Новый»\n"
+    "/complete ID — отметить сигнал завершённым после проверки результата агента"
 )
 
 
@@ -150,43 +188,37 @@ async def cmd_start(message: Message) -> None:
     await message.answer(START_TEXT)
 
 
-@router.message(Command("today"))
-async def cmd_today(message: Message) -> None:
-    if not is_allowed(message.from_user.id):
-        return
-    today = dt.date.today()
-    with get_session_factory()() as db:
+LIST_HEADERS = {
+    "today": "Сигналы за сегодня",
+    "pending": "В работе / отложены",
+    "history": "История (последние 10)",
+    "digest": "Утренняя сводка",
+}
+
+
+def _signals_for_kind(db: Session, kind: str) -> list[Signal]:
+    """Общий подбор сигналов для команд /today /pending /history /digest и для кнопок
+    фильтра по приоритету (`on_priority_filter`) — один и тот же запрос независимо от
+    того, вызван он напрямую командой или пересчитан заново после нажатия кнопки."""
+    if kind == "today":
+        today = dt.date.today()
         signals = (
             db.query(Signal)
             .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([SignalStatus.NEW, SignalStatus.POSTPONED]))
             .all()
         )
-        signals = [s for s in signals if s.created_at.date() == today]
-    await _send_list(message, signals, "Сигналы за сегодня")
-
-
-@router.message(Command("pending"))
-async def cmd_pending(message: Message) -> None:
-    if not is_allowed(message.from_user.id):
-        return
-    with get_session_factory()() as db:
-        signals = (
+        return [s for s in signals if s.created_at.date() == today]
+    if kind == "pending":
+        return (
             db.query(Signal)
             .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([SignalStatus.IN_PROGRESS, SignalStatus.POSTPONED]))
             .order_by(Signal.created_at)
             .all()
         )
-    await _send_list(message, signals, "В работе / отложены")
-
-
-@router.message(Command("history"))
-async def cmd_history(message: Message) -> None:
-    if not is_allowed(message.from_user.id):
-        return
-    with get_session_factory()() as db:
-        signals = (
+    if kind == "history":
+        return (
             db.query(Signal)
             .options(selectinload(Signal.categories))
             .filter(Signal.status.in_([
@@ -196,7 +228,36 @@ async def cmd_history(message: Message) -> None:
             .limit(10)
             .all()
         )
-    await _send_list(message, signals, "История (последние 10)")
+    if kind == "digest":
+        return _digest_signals(db)
+    raise ValueError(f"неизвестный вид списка сигналов: {kind!r}")
+
+
+@router.message(Command("today"))
+async def cmd_today(message: Message) -> None:
+    if not is_allowed(message.from_user.id):
+        return
+    with get_session_factory()() as db:
+        signals = _signals_for_kind(db, "today")
+    await _send_list(message, signals, "today")
+
+
+@router.message(Command("pending"))
+async def cmd_pending(message: Message) -> None:
+    if not is_allowed(message.from_user.id):
+        return
+    with get_session_factory()() as db:
+        signals = _signals_for_kind(db, "pending")
+    await _send_list(message, signals, "pending")
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message) -> None:
+    if not is_allowed(message.from_user.id):
+        return
+    with get_session_factory()() as db:
+        signals = _signals_for_kind(db, "history")
+    await _send_list(message, signals, "history")
 
 
 @router.message(Command("stats"))
@@ -225,7 +286,7 @@ async def cmd_reopen(message: Message, command: CommandObject) -> None:
     if not is_allowed(message.from_user.id):
         return
     if not command.args or not command.args.strip().isdigit():
-        await message.answer("Формат: /reopen <id>")
+        await message.answer("Формат: /reopen ID")
         return
     sig_id = int(command.args.strip())
     db_factory = get_session_factory()
@@ -253,7 +314,7 @@ async def cmd_complete(message: Message, command: CommandObject) -> None:
     if not is_allowed(message.from_user.id):
         return
     if not command.args or not command.args.strip().isdigit():
-        await message.answer("Формат: /complete <id>")
+        await message.answer("Формат: /complete ID")
         return
     sig_id = int(command.args.strip())
     db_factory = get_session_factory()
@@ -295,27 +356,69 @@ async def cmd_digest(message: Message) -> None:
     if not signals:
         await message.answer("Новых сигналов нет.")
         return
-    await message.answer(f"📬 Утренняя сводка: {len(signals)} сигналов")
+    await message.answer(
+        f"📬 Утренняя сводка: {len(signals)} сигналов", reply_markup=priority_filter_kb("digest", "all")
+    )
     for s in signals:
         cats = [c.category.value for c in s.categories] if s.categories else []
         await message.answer(signal_card(s, cats), reply_markup=signal_kb(s.id))
 
 
-async def _send_list(message: Message, signals: list[Signal], header: str) -> None:
+async def _send_list(message: Message, signals: list[Signal], kind: str) -> None:
+    """`kind` — ключ в `LIST_HEADERS`/`_signals_for_kind`, он же префикс
+    `callback_data` кнопок фильтра по приоритету (`priority_filter_kb`,
+    `on_priority_filter`) — по нему кнопка знает, какой запрос повторить.
+
+    Отправляет только заголовок с кнопками, без карточек — найдено вживую: команда
+    сразу выгружала все сигналы отдельными сообщениями, даже без выбора фильтра,
+    неудобно при десятках сигналов (после подключения Yandex Search,
+    docs/SPEC_yandex_search_discovery.md раздел 5). Карточки показываются только по
+    нажатию кнопки (`on_priority_filter`) — включая «Все», это тоже осознанный выбор,
+    не выполняется автоматически."""
+    header = LIST_HEADERS[kind]
     if not signals:
         await message.answer(f"{header}: пусто")
         return
-    await message.answer(f"{header}: {len(signals)}")
-    for s in signals:
-        cats = [c.category.value for c in s.categories] if s.categories else []
-        await message.answer(signal_card(s, cats), reply_markup=signal_kb(s.id))
+    await message.answer(
+        f"{header}: {len(signals)}. Выберите приоритет, чтобы показать карточки:",
+        reply_markup=priority_filter_kb(kind, ""),
+    )
 
 
 # --- Кнопки ------------------------------------------------------------------
 
 
+@router.callback_query(F.data.startswith("filter:"))
+async def on_priority_filter(cb: CallbackQuery) -> None:
+    """Кнопки под заголовком списка (`priority_filter_kb`) — пересчитывают тот же
+    список (`_signals_for_kind`), которым он был построен изначально, с фильтром по
+    приоритету. Заголовок редактируется на месте (число сигналов + подсвеченная
+    активная кнопка); карточки под ним не трогаются — отправляются новым набором
+    сообщений, старые из чата не удаляются (проще и надёжнее, чем частично
+    редактировать/удалять уже отправленные карточки)."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, kind, code = cb.data.split(":")
+    with get_session_factory()() as db:
+        signals = apply_priority_filter(_signals_for_kind(db, kind), code)
+
+    header = LIST_HEADERS[kind]
+    header_text = f"{header}: пусто" if not signals else f"{header}: {len(signals)}"
+    await cb.message.edit_text(header_text, reply_markup=priority_filter_kb(kind, code))  # type: ignore[union-attr]
+    for s in signals:
+        cats = [c.category.value for c in s.categories] if s.categories else []
+        await cb.message.answer(signal_card(s, cats), reply_markup=signal_kb(s.id))  # type: ignore[union-attr]
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("sig:"))
 async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
+    """Найдено вживую (2026-08-20, после добавления второго эксперта в whitelist):
+    двойное нажатие «✅ Взять в работу» (или гонка двух экспертов на одном сигнале)
+    роняло `InvalidStatusTransition` необработанным — апдейт падал молча, эксперт не
+    получал вообще никакого ответа в чате. Все переходы статуса из кнопок теперь
+    оборачивают `transition_status` и отвечают понятным сообщением вместо падения."""
     if not is_allowed(cb.from_user.id):
         await cb.answer("Нет доступа", show_alert=True)
         return
@@ -328,7 +431,15 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
             await cb.answer("Сигнал не найден", show_alert=True)
             return
         if action == "work":
-            transition_status(db, s, SignalStatus.IN_PROGRESS, changed_by=cb.from_user.id)
+            try:
+                transition_status(db, s, SignalStatus.IN_PROGRESS, changed_by=cb.from_user.id)
+            except InvalidStatusTransition:
+                await cb.answer(
+                    f"Сигнал уже в статусе «{STATUS_LABELS.get(s.status, s.status)}» "
+                    "(возможно, кто-то уже взял его в работу)",
+                    show_alert=True,
+                )
+                return
             db.commit()
             log.info("сигнал %s -> В работе (user=%s)", sig_id, cb.from_user.id)
             await state.set_state(NpaFlow.ask_npa_link)
@@ -342,7 +453,13 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
             await state.update_data(sig_id=sig_id)
             await cb.message.edit_reply_markup(reply_markup=reject_kb(sig_id))  # type: ignore[union-attr]
         elif action == "later":
-            transition_status(db, s, SignalStatus.POSTPONED, changed_by=cb.from_user.id)
+            try:
+                transition_status(db, s, SignalStatus.POSTPONED, changed_by=cb.from_user.id)
+            except InvalidStatusTransition:
+                await cb.answer(
+                    f"Сигнал уже в статусе «{STATUS_LABELS.get(s.status, s.status)}»", show_alert=True
+                )
+                return
             db.commit()
             log.info("сигнал %s -> Отложен (user=%s)", sig_id, cb.from_user.id)
             await cb.message.answer("↩️ Отложен — вернётся в следующую сводку.")  # type: ignore[union-attr]
@@ -364,12 +481,20 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
     with db_factory() as db:
         s = db.get(Signal, sig_id)
         if s:
-            # rejection_reason (не reason=) — иначе db.service.transition_status поднимает
-            # ValueError "Отклонение сигнала требует причины" (там reason — свободный
-            # текст-заметка в аудите, rejection_reason — структурированное поле Signal).
-            transition_status(
-                db, s, SignalStatus.REJECTED, changed_by=cb.from_user.id, rejection_reason=reason
-            )
+            try:
+                # rejection_reason (не reason=) — иначе db.service.transition_status
+                # поднимает ValueError "Отклонение сигнала требует причины" (там
+                # reason — свободный текст-заметка в аудите, rejection_reason —
+                # структурированное поле Signal).
+                transition_status(
+                    db, s, SignalStatus.REJECTED, changed_by=cb.from_user.id, rejection_reason=reason
+                )
+            except InvalidStatusTransition:
+                await state.clear()
+                await cb.answer(
+                    f"Сигнал уже в статусе «{STATUS_LABELS.get(s.status, s.status)}»", show_alert=True
+                )
+                return
             db.commit()
             log.info("сигнал %s -> Отклонён: %s (user=%s)", sig_id, reason.value, cb.from_user.id)
     await state.clear()
@@ -422,7 +547,15 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
             return
         if npa_link is not None:
             s.npa_link = npa_link
-        transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=message.from_user.id)
+        try:
+            transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=message.from_user.id)
+        except InvalidStatusTransition:
+            await message.answer(
+                f"Сигнал уже в статусе «{STATUS_LABELS.get(s.status, s.status)}» — "
+                "возможно, кто-то уже отправил ссылку раньше."
+            )
+            await state.clear()
+            return
         db.commit()
         _autoupdate_client.send(s.npa_link, s.measure_id)
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
@@ -444,8 +577,9 @@ async def remind_stale(bot: Bot) -> None:
             Signal.status == SignalStatus.IN_PROGRESS, Signal.updated_at < threshold
         ).all()
     for s in stale:
+        title = html.escape(s.title or "(без названия)", quote=False)
         for uid in get_settings().allowed_user_ids:
-            await bot.send_message(uid, f"⏰ Сигнал {s.id} в работе больше 3 дней: {s.title}")
+            await bot.send_message(uid, f"⏰ Сигнал {s.id} в работе больше 3 дней: {title}")
 
 
 async def _reminder_loop(bot: Bot) -> None:
@@ -482,7 +616,8 @@ async def send_digest(bot: Bot) -> None:
         if not signals:
             await bot.send_message(uid, "Новых сигналов нет.")
             continue
-        await bot.send_message(uid, f"📬 Утренняя сводка: {len(signals)} сигналов")
+        header_text = f"📬 Утренняя сводка: {len(signals)} сигналов"
+        await bot.send_message(uid, header_text, reply_markup=priority_filter_kb("digest", "all"))
         for s in signals:
             cats = [c.category.value for c in s.categories] if s.categories else []
             await bot.send_message(uid, signal_card(s, cats), reply_markup=signal_kb(s.id))
@@ -502,7 +637,11 @@ async def main() -> None:
     settings = get_settings()
     if not settings.telegram_bot_token:
         raise SystemExit("TELEGRAM_BOT_TOKEN не задан")
-    bot = Bot(settings.telegram_bot_token)
+    # parse_mode="HTML" по умолчанию для всех отправок — без него `<b>...</b>` в
+    # signal_card() показывался пользователю буквально, а не жирным (найдено вживую
+    # по жалобе пользователя: «там есть <b></b>»). Раньше нигде не передавался ни
+    # глобально, ни поштучно в message.answer()/bot.send_message().
+    bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     reminder = asyncio.create_task(_reminder_loop(bot))

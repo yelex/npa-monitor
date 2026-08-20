@@ -118,12 +118,23 @@ async def test_happy_path_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
         ]
 
     # --- Завершённый сигнал уходит в /history, не в /today ---
+    # /history теперь показывает только заголовок с кнопками фильтра (карточки — по
+    # клику, см. bot/main.py::_send_list) — сама карточка проверяется через клик
+    # «Все» (on_priority_filter), а не сразу в ответе команды.
     history_message = MagicMock()
     history_message.from_user.id = 111
     history_message.answer = AsyncMock()
     await bot_main.cmd_history(history_message)
-    assert history_message.answer.await_count == 2  # заголовок + карточка сигнала
-    assert f"🆔 <b>{sig_id}</b>" in history_message.answer.await_args_list[1].args[0]
+    assert history_message.answer.await_count == 1  # только заголовок
+
+    history_cb = MagicMock()
+    history_cb.from_user.id = 111
+    history_cb.data = "filter:history:all"
+    history_cb.message.edit_text = AsyncMock()
+    history_cb.message.answer = AsyncMock()
+    history_cb.answer = AsyncMock()
+    await bot_main.on_priority_filter(history_cb)
+    assert f"🆔 <b>{sig_id}</b>" in history_cb.message.answer.await_args_list[0].args[0]
 
     today_message = MagicMock()
     today_message.from_user.id = 111
