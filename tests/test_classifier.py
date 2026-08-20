@@ -149,3 +149,37 @@ def test_event_type_new_document_detected() -> None:
 def test_event_type_defaults_to_review_without_markers() -> None:
     pub = _publication("sfr.gov.ru/press_center/news", "постановление ветеран боевых действий выплата")
     assert CLASSIFIER.classify(pub).event_type == EventType.REVIEW
+
+
+# --- explain() / трейс ---
+
+
+def test_explain_result_matches_classify() -> None:
+    pub = _publication("sfr.gov.ru/press_center/news", "постановление ветеран боевых действий выплата")
+    assert CLASSIFIER.explain(pub).result == CLASSIFIER.classify(pub)
+
+
+def test_explain_reports_matched_keywords() -> None:
+    pub = _publication("mintrud.gov.ru/docs", "приказ инвалид пособие")
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.category_matches == {SignalCategory.DISABLED: ("инвалид",)}
+    assert trace.topic_block_matches == ("пособие",)
+    assert trace.document_marker_matches == ("приказ",)
+
+
+def test_explain_reports_no_matches_when_irrelevant() -> None:
+    pub = _publication("sfr.gov.ru/press_center/news", "постановление выплата новый")
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.category_matches == {}
+    assert trace.result.is_relevant is False
+
+
+def test_explain_format_is_readable() -> None:
+    pub = _publication("mintrud.gov.ru/docs", "приказ инвалид пособие")
+    text = CLASSIFIER.explain(pub).format()
+
+    assert "инвалид" in text
+    assert "пособие" in text
+    assert "РЕЛЕВАНТНО" in text

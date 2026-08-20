@@ -2,7 +2,7 @@
 модуля): реальные публикации sfr.gov.ru, пропущенные точным совпадением подстроки."""
 from __future__ import annotations
 
-from parser.ru_stem import contains_keyword
+from parser.ru_stem import contains_keyword, find_matches
 
 
 def test_exact_form_still_matches() -> None:
@@ -62,3 +62,12 @@ def test_dobrovolec_does_not_match_unrelated_dobrovolny() -> None:
 
 def test_dobrovolec_exact_form_still_matches() -> None:
     assert contains_keyword("доброволец подписал контракт", ("доброволец",)) is True
+
+
+def test_find_matches_returns_matched_keywords() -> None:
+    text = "получили компенсацию и новую субсидию"
+    assert find_matches(text, ("компенсация", "субсидия", "льгота")) == ("компенсация", "субсидия")
+
+
+def test_find_matches_empty_when_nothing_matches() -> None:
+    assert find_matches("ничего не подходит", ("компенсация", "льгота")) == ()

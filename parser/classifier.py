@@ -40,7 +40,7 @@ from db.catalog import (
 )
 from db.enums import EventType, Priority, Region, SignalCategory
 from parser.models import Publication
-from parser.ru_stem import contains_keyword
+from parser.ru_stem import contains_keyword, find_matches
 
 # Порядок проверки типов событий: более специфичные сигналы (отмена, вступление в силу)
 # проверяются раньше общего «изменение», чтобы не перекрывались.
@@ -59,6 +59,49 @@ class ClassificationResult:
     event_type: EventType
     region: Region
     priority: Priority
+
+
+@dataclasses.dataclass(frozen=True)
+class ClassificationTrace:
+    """Подробности классификации — какие именно ключевые слова совпали и почему принято
+    такое решение. Не используется для самого решения (см. `Classifier.classify`,
+    построен на тех же данных) — только для трейса/отладки (PLAN.md Фаза 6+: «видеть,
+    как парсер принимает решение»)."""
+
+    category_matches: dict[SignalCategory, tuple[str, ...]]  # только категории с совпадением
+    topic_block_matches: tuple[str, ...]
+    document_marker_matches: tuple[str, ...]
+    priority_word_matches: tuple[str, ...]
+    event_type_matches: dict[EventType, tuple[str, ...]]  # только типы с совпадением
+    result: ClassificationResult
+
+    def format(self) -> str:
+        lines = []
+        if self.category_matches:
+            cats = ", ".join(
+                f"{cat.value} (по {', '.join(kws)!r})" for cat, kws in self.category_matches.items()
+            )
+            lines.append(f"ЖС: {cats}")
+        else:
+            lines.append("ЖС: нет совпадений")
+
+        if self.topic_block_matches:
+            lines.append(f"тематический блок: да ({', '.join(self.topic_block_matches)!r})")
+        else:
+            lines.append("тематический блок: нет совпадений")
+
+        lines.append("РЕЛЕВАНТНО" if self.result.is_relevant else "не релевантно")
+
+        if self.document_marker_matches:
+            lines.append(f"маркер документа: {', '.join(self.document_marker_matches)!r}")
+        if self.priority_word_matches:
+            lines.append(f"слово приоритета: {', '.join(self.priority_word_matches)!r}")
+
+        lines.append(
+            f"тип события: {self.result.event_type.value}; "
+            f"регион: {self.result.region.value}; приоритет: {self.result.priority.value}"
+        )
+        return " | ".join(lines)
 
 
 def _contains_any(text_lower: str, keywords: tuple[str, ...]) -> bool:
@@ -138,20 +181,47 @@ class Classifier:
         )
 
     def classify(self, publication: Publication) -> ClassificationResult:
+        return self.explain(publication).result
+
+    def explain(self, publication: Publication) -> ClassificationTrace:
+        """Как `classify`, но возвращает ещё и разбор — какие ключевые слова совпали
+        (трейс для логов парсера, см. `parser/orchestrator.py`)."""
         text = _publication_text(publication)
         text_lower = text.lower()
 
-        categories = match_categories(text, self.life_situations)
-        is_relevant = bool(categories) and _contains_any(text_lower, self.keywords.topic_block)
+        category_matches = {
+            situation.category: matches
+            for situation in self.life_situations
+            if (matches := find_matches(text_lower, situation.keywords))
+        }
+        categories = tuple(category_matches)
+        topic_block_matches = find_matches(text_lower, self.keywords.topic_block)
+        is_relevant = bool(categories) and bool(topic_block_matches)
 
         region = detect_region(publication, self.regions, self.federal_domains)
         event_type = detect_event_type(text, self.keywords)
         priority = detect_priority(text, self.keywords, region)
 
-        return ClassificationResult(
+        document_marker_matches = find_matches(text_lower, self.keywords.document_markers)
+        priority_word_matches = find_matches(text_lower, self.keywords.priority_high_words)
+        event_type_matches = {
+            et: matches
+            for et in _EVENT_TYPE_CHECK_ORDER
+            if (matches := find_matches(text_lower, self.keywords.event_type_markers.get(et, ())))
+        }
+
+        result = ClassificationResult(
             is_relevant=is_relevant,
             categories=categories,
             event_type=event_type,
             region=region,
             priority=priority,
+        )
+        return ClassificationTrace(
+            category_matches=category_matches,
+            topic_block_matches=topic_block_matches,
+            document_marker_matches=document_marker_matches,
+            priority_word_matches=priority_word_matches,
+            event_type_matches=event_type_matches,
+            result=result,
         )

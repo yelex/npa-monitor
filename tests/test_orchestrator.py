@@ -155,6 +155,51 @@ def test_process_source_stops_pagination_at_window_start(session: Session, class
     assert call_count == 1  # остановились на первой странице
 
 
+def test_process_source_stops_scanning_page_at_first_stale_item(
+    session: Session, classifier: Classifier
+) -> None:
+    """Публикации в странице идут от новых к старым — первая же старше окна должна
+    остановить проверку остальных элементов ТОЙ ЖЕ страницы, не только пагинацию."""
+    from parser.state import mark_source_processed
+
+    window_start = NOW - dt.timedelta(hours=24)
+    mark_source_processed(session, "sfr.gov.ru/press_center/news", success_at=window_start)
+    session.commit()
+
+    fresh = _pub(
+        "sfr.gov.ru/press_center/news",
+        "постановление ветеран боевых действий выплата",
+        "https://sfr.gov.ru/n/fresh",
+        published_at=NOW,
+    )
+    stale = _pub(
+        "sfr.gov.ru/press_center/news",
+        "постановление ветеран боевых действий выплата",
+        "https://sfr.gov.ru/n/stale",
+        published_at=window_start - dt.timedelta(hours=1),
+    )
+    # ещё одна "свежая" публикация ПОСЛЕ старой в том же списке — реалистичный листинг
+    # так никогда не выдаст (сортировка по дате), но так тест ловит именно ошибку
+    # "continue вместо break": будь она, эта публикация тоже создала бы сигнал.
+    fresh_after_stale = _pub(
+        "sfr.gov.ru/press_center/news",
+        "постановление ветеран боевых действий выплата",
+        "https://sfr.gov.ru/n/fresh-after-stale",
+        published_at=NOW,
+    )
+
+    spec = SourceSpec(
+        "sfr.gov.ru/press_center/news", lambda page=1: [fresh, stale, fresh_after_stale] if page == 1 else []
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1  # только fresh, не fresh_after_stale
+    leftover = session.query(Signal).filter(Signal.source_url == "https://sfr.gov.ru/n/fresh-after-stale")
+    assert leftover.count() == 0
+
+
 def test_process_source_marks_unavailable_source_without_processing(
     session: Session, classifier: Classifier
 ) -> None:

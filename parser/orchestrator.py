@@ -113,8 +113,17 @@ def process_source(
             reached_window_start = False
             for pub in publications:
                 if pub.published_at is not None and pub.published_at < window_start:
+                    # Публикации идут от новых к старым — как только встретили одну
+                    # старше окна, все следующие в этой странице тоже старше, дальше
+                    # не проверяем (не только эту страницу — весь источник, ниже).
                     reached_window_start = True
-                    continue
+                    log.debug(
+                        "публикация старше окна поиска (%s < %s), обход источника остановлен: %r",
+                        pub.published_at,
+                        window_start,
+                        pub.title,
+                    )
+                    break
                 _process_publication(session, classifier, pub, whitelisted_domains, result)
 
             if reached_window_start or not spec.paginated:
@@ -146,18 +155,25 @@ def _process_publication(
     whitelisted_domains: set[str],
     result: SourceRunResult,
 ) -> None:
+    log.debug("публикация: %r (%s) %s", pub.title, pub.published_at, pub.url)
+
     if not is_domain_whitelisted(pub.url, whitelisted_domains):
+        log.debug("  домен не в белом списке источников — пропуск")
         return
 
     _, created = register_document_seen(session, source_key=pub.source_key, doc_url=pub.url)
     if not created:
         result.duplicates += 1
+        log.debug("  уже обработана ранее (дубликат по URL) — пропуск")
         return
 
-    classification = classifier.classify(pub)
-    signal = build_signal(session, pub, classification)
+    trace = classifier.explain(pub)
+    log.debug("  %s", trace.format())
+
+    signal = build_signal(session, pub, trace.result)
     if signal is not None:
         result.new_signals += 1
+        log.debug("  -> сигнал создан, id=%s", signal.id)
     else:
         result.irrelevant += 1
 

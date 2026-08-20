@@ -65,3 +65,9 @@ def keyword_pattern(keyword: str) -> re.Pattern[str]:
 
 def contains_keyword(text_lower: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword_pattern(kw).search(text_lower) for kw in keywords)
+
+
+def find_matches(text_lower: str, keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """Как `contains_keyword`, но возвращает сами совпавшие ключевые слова — для
+    трейса классификации (PLAN.md Фаза 6+, «видеть, как парсер принимает решение»)."""
+    return tuple(kw for kw in keywords if keyword_pattern(kw).search(text_lower))
