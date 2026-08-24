@@ -933,6 +933,103 @@ async def test_on_priority_filter_all_renders_history_signal_with_categories() -
     assert "СВО" in cb.message.answer.await_args.args[0]
 
 
+# --- /sent: что передано агенту, с деталями подтверждения аналитика (Фаза 10.x) ---
+
+
+async def test_cmd_sent_ignores_unauthorized_user() -> None:
+    message = MagicMock()
+    message.from_user.id = 999  # не в ALLOWED_TELEGRAM_USER_IDS
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    message.answer.assert_not_awaited()
+
+
+async def test_cmd_sent_reports_no_signals_when_empty() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    message.answer.assert_awaited_once_with("Переданных агенту сигналов нет.")
+
+
+async def test_cmd_sent_shows_card_with_confirmation_details(monkeypatch) -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
+    monkeypatch.setattr(bot_main._autoupdate_client, "send", MagicMock())
+    await _run_full_npa_flow(sig_id, link_text="https://sfr.gov.ru/document/1", region_code="rf")
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    assert message.answer.await_count == 2  # заголовок + одна карточка
+    card = message.answer.await_args.args[0]
+    assert f"🆔 <b>{sig_id}</b>" in card
+    assert "ВБД" in card
+    assert "Регион: РФ" in card
+    assert "sfr.gov.ru/document/1" in card
+    assert "Передал агенту: 111" in card
+    assert "правки аналитика" not in card  # подтверждение = классификатор один в один
+
+
+async def test_cmd_sent_shows_audit_line_on_analyst_divergence() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    await _run_full_npa_flow(sig_id, region_code="moscow")  # аналитик поменял регион
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    card = message.answer.await_args.args[0]
+    assert "правки аналитика: classifier=" in card
+    assert "region=rf" in card
+    assert "confirmed=" in card
+    assert "region=moscow" in card
+
+
+async def test_cmd_sent_excludes_signals_still_in_progress() -> None:
+    _make_in_progress_signal(categories=[SignalCategory.SVO])
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    message.answer.assert_awaited_once_with("Переданных агенту сигналов нет.")
+
+
+async def test_cmd_sent_includes_completed_signals() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.DISABLED])
+    await _run_full_npa_flow(sig_id, region_code="rf")
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        from db.service import transition_status
+
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.COMPLETED)
+        session.commit()
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+
+    await bot_main.cmd_sent(message)
+
+    assert message.answer.await_count == 2
+    card = message.answer.await_args.args[0]
+    assert "Инвалиды" in card
+    assert "Передал агенту: 111" in card  # дата SENT_TO_AGENT, а не последующего COMPLETED
+
+
 # --- Утренняя сводка (рассылка, PLAN.md Фаза 6) ---
 
 
@@ -999,7 +1096,7 @@ async def test_cmd_start_answers_with_command_list() -> None:
     await bot_main.cmd_start(message)
 
     text = message.answer.await_args.args[0]
-    for command in ("/today", "/pending", "/history", "/stats", "/reopen", "/complete"):
+    for command in ("/today", "/pending", "/history", "/sent", "/stats", "/reopen", "/complete"):
         assert command in text
 
 
@@ -1057,7 +1154,9 @@ def test_router_maps_each_command_name_to_matching_handler() -> None:
                     )
                     seen.add(command)
 
-    assert seen == {"start", "today", "pending", "history", "stats", "reopen", "complete", "digest"}
+    assert seen == {
+        "start", "today", "pending", "history", "sent", "stats", "reopen", "complete", "digest",
+    }
 
 
 async def test_cmd_digest_reports_no_signals_when_empty() -> None:

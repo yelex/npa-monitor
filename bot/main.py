@@ -28,7 +28,7 @@ from bot.autoupdate_client import AutoUpdateAgentClient
 from config import get_settings
 from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
 from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus
-from db.models import Signal, SignalCategoryLink
+from db.models import Signal, SignalCategoryLink, StatusHistory
 from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.fetcher import SourceUnavailable, fetch
@@ -122,6 +122,38 @@ def signal_card(s: Signal, categories: list[str]) -> str:
     return "\n".join(x for x in lines if x)
 
 
+def _sent_to_agent_transition(s: Signal) -> StatusHistory | None:
+    """Переход в SENT_TO_AGENT происходит ровно один раз за жизнь сигнала (нет пути
+    назад из SENT_TO_AGENT/COMPLETED в IN_PROGRESS, см. `db.service.ALLOWED_TRANSITIONS`)
+    — берём последнюю запись на случай будущих исключений из этого правила."""
+    matches = [h for h in s.history if h.to_status == SignalStatus.SENT_TO_AGENT]
+    return matches[-1] if matches else None
+
+
+def sent_signal_card(s: Signal, categories: list[str], transition: StatusHistory | None) -> str:
+    """Карточка для /sent: в отличие от `signal_card`, ЖС/регион показывают итог
+    подтверждения аналитиком (Фаза 10, `_finish_npa_flow` перезаписывает эти поля
+    подтверждёнными значениями до перехода в SENT_TO_AGENT), плюс кто/когда передал и
+    расхождение с классификатором (`_audit_reason`), если оно было."""
+    cats = ", ".join(CATEGORY_LABELS.get(c, c) for c in categories) or "—"
+    title = html.escape(s.title or "(без названия)", quote=False)
+    npa_link = html.escape(s.npa_link, quote=False) if s.npa_link else "—"
+    lines = [
+        f"🆔 <b>{s.id}</b> · {STATUS_LABELS.get(s.status, s.status)}",
+        f"<b>{title}</b>",
+        f"ЖС: {cats}",
+        f"Регион: {REGION_LABELS.get(s.region.value if s.region else '', s.region or '—')}",
+        f"Ссылка на НПА: {npa_link}",
+    ]
+    if transition is not None:
+        who = html.escape(str(transition.changed_by), quote=False) if transition.changed_by else "—"
+        lines.append(f"Передал агенту: {who}, {transition.changed_at:%d.%m.%Y %H:%M}")
+        if transition.reason and "classifier=" in transition.reason and "confirmed=" in transition.reason:
+            reason = html.escape(transition.reason, quote=False)
+            lines.append(f"правки аналитика: {reason}")
+    return "\n".join(x for x in lines if x)
+
+
 def signal_kb(sig_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -204,6 +236,8 @@ START_TEXT = (
     "/today — сигналы «Новый»/«Отложен» за сегодня\n"
     "/pending — всё «В работе»/«Отложен»\n"
     "/history — последние 10 из «Передан агенту»/«Завершён»/«Отклонён»\n"
+    "/sent — последние 15 переданных агенту, с деталями подтверждения (ЖС, регион, "
+    "ссылка на НПА, кто и когда передал)\n"
     "/stats — статистика за 7 дней\n"
     "/digest — сводка новых и отложенных сигналов по запросу\n"
     "/reopen ID — вернуть отклонённый сигнал в «Новый»\n"
@@ -260,6 +294,15 @@ def _signals_for_kind(db: Session, kind: str) -> list[Signal]:
         )
     if kind == "digest":
         return _digest_signals(db)
+    if kind == "sent":
+        return (
+            db.query(Signal)
+            .options(selectinload(Signal.categories), selectinload(Signal.history))
+            .filter(Signal.status.in_([SignalStatus.SENT_TO_AGENT, SignalStatus.COMPLETED]))
+            .order_by(Signal.updated_at.desc())
+            .limit(15)
+            .all()
+        )
     raise ValueError(f"неизвестный вид списка сигналов: {kind!r}")
 
 
@@ -288,6 +331,25 @@ async def cmd_history(message: Message) -> None:
     with get_session_factory()() as db:
         signals = _signals_for_kind(db, "history")
     await _send_list(message, signals, "history")
+
+
+@router.message(Command("sent"))
+async def cmd_sent(message: Message) -> None:
+    """Что аналитик передал агенту (SENT_TO_AGENT/COMPLETED), с деталями подтверждения
+    — в отличие от /today /pending /history, показывает карточки сразу (не прячет их
+    за кнопкой фильтра): весь смысл команды в деталях внутри карточки, не в списке."""
+    if not is_allowed(message.from_user.id):
+        return
+    with get_session_factory()() as db:
+        signals = _signals_for_kind(db, "sent")
+    if not signals:
+        await message.answer("Переданных агенту сигналов нет.")
+        return
+    await message.answer(f"📤 Передано агенту (последние {len(signals)}):")
+    for s in signals:
+        cats = [c.category.value for c in s.categories] if s.categories else []
+        transition = _sent_to_agent_transition(s)
+        await message.answer(sent_signal_card(s, cats, transition))
 
 
 @router.message(Command("stats"))
