@@ -9,8 +9,10 @@
 #   ./scripts/cleanup_signals.sh [user@]host [port] [--apply]
 #   по умолчанию — 151.243.180.35:22, root (как в deploy.sh/dump_signals.sh)
 #
-# Перед --apply на боевой БД сделать бэкап файла (см. раздел 7 спеки):
-#   ssh ... "cd /opt/npa-monitor && cp data/npa_monitor.db data/npa_monitor.db.bak-$(date +%F)"
+# Перед --apply на боевой БД сделать бэкап файла (см. раздел 7 спеки). data/ смонтирован
+# как именованный docker-том, не bind-mount хостового пути — cp нужно делать внутри
+# контейнера:
+#   ssh ... "cd /opt/npa-monitor && docker compose exec -T bot cp data/npa_monitor.db data/npa_monitor.db.bak-$(date +%F)"
 
 set -euo pipefail
 
