@@ -19,5 +19,8 @@ build/
 # Ralph loop
 ralph_logs/
 
+# Локальные выгрузки данных с сервера (не для git)
+signals_dump*.txt
+
 # macOS
 .DS_Store
