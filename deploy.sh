@@ -43,6 +43,9 @@ echo "==> Проверка SSH-доступа к ${REMOTE_USER}@${HOST}:${PORT}"
 echo "==> Установка Docker на сервере (если ещё не установлен)"
 "${SSH[@]}" "command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh"
 
+echo "==> Установка rsync на сервере (если ещё не установлен — нужен на обоих концах)"
+"${SSH[@]}" "command -v rsync >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq rsync)"
+
 echo "==> Создание директории проекта на сервере"
 "${SSH[@]}" "mkdir -p ${REMOTE_DIR}"
 
@@ -66,6 +69,9 @@ echo "==> Остановка предыдущего контейнера bot н�
 
 echo "==> Запуск бота (docker compose up -d bot)"
 "${SSH[@]}" "cd ${REMOTE_DIR} && docker compose up -d bot"
+
+echo "==> Установка cron на сервере (если ещё не установлен — минимальные образы его не включают)"
+"${SSH[@]}" "command -v crontab >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq cron && (systemctl enable --now cron 2>/dev/null || service cron start))"
 
 echo "==> Настройка cron для ежедневного парсера (06:00)"
 CRON_LINE="0 6 * * * cd ${REMOTE_DIR} && docker compose run --rm parser >> /var/log/npa-monitor-parser.log 2>&1"
