@@ -100,6 +100,43 @@ def test_process_source_dedups_on_second_run(session: Session, classifier: Class
     assert session.query(Signal).count() == 1  # не создан повторно
 
 
+def test_process_source_dedups_by_canonicalized_url_across_pages(
+    session: Session, classifier: Classifier
+) -> None:
+    # PLAN.md Фаза 9 п.2 / docs/SPEC_url_canonicalization.md: та же публикация под
+    # `?index=N`-вариантом URL (pravo.gov.ru) не должна создавать второй сигнал, даже
+    # если сырой URL отличается.
+    page1 = [
+        _pub(
+            "sfr.gov.ru/press_center/news",
+            "постановление ветеран боевых действий выплата",
+            "http://sfr.gov.ru/n/4?index=9",
+            published_at=NOW,
+        )
+    ]
+    page2 = [
+        _pub(
+            "sfr.gov.ru/press_center/news",
+            "постановление ветеран боевых действий выплата",
+            "https://www.sfr.gov.ru/n/4?index=10",
+            published_at=NOW,
+        )
+    ]
+    pages = {1: page1, 2: page2}
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: pages.get(page, []))
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.duplicates == 1
+    assert session.query(Signal).count() == 1
+    # Эксперту в карточке по-прежнему виден оригинальный URL первой встреченной страницы,
+    # не канонизированный — канонизация только для внутреннего сравнения дублей.
+    signal = session.query(Signal).one()
+    assert signal.source_url == "http://sfr.gov.ru/n/4?index=9"
+
+
 def test_process_source_rejects_non_whitelisted_domain(session: Session, classifier: Classifier) -> None:
     publications = [
         _pub(

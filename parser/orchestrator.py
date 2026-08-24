@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from db.catalog import all_domains
 from db.service import register_document_seen
 from parser.classifier import Classifier
+from parser.dedup import canonicalize_url
 from parser.fetcher import SourceUnavailable
 from parser.filters import is_domain_whitelisted, is_excluded_path
 from parser.models import Publication
@@ -181,7 +182,14 @@ def _process_publication(
         log.debug("  URL — известная статичная/справочная страница, не событие — пропуск")
         return
 
-    _, created = register_document_seen(session, source_key=pub.source_key, doc_url=pub.url)
+    # PLAN.md Фаза 9 п.2 / docs/SPEC_url_canonicalization.md: дедуп по канонизированному
+    # URL (без www./схемы/шумовых query-параметров), не по сырому pub.url — иначе
+    # `?index=N`-варианты того же документа проходят как разные публикации. Сигналу
+    # (build_signal ниже) при этом всё равно передаётся оригинальный pub.url — эксперт
+    # должен видеть реальную ссылку источника, канонизация нужна только для сравнения.
+    _, created = register_document_seen(
+        session, source_key=pub.source_key, doc_url=canonicalize_url(pub.url)
+    )
     if not created:
         result.duplicates += 1
         log.debug("  уже обработана ранее (дубликат по URL) — пропуск")
