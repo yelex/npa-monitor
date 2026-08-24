@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     glm_personal_base_url: str = "https://api.z.ai/api/coding/paas/v4"
     glm_personal_model: str = "glm-5.1"
 
+    # LLM-приоритизация (Фаза 11, docs/SPEC_llm_priority.md, раздел «Аудит»): по
+    # умолчанию только структурированный лог "would change", БД не меняется — неделя
+    # наблюдения на реальном потоке перед включением записи в БД.
+    llm_priority_apply: bool = False
+
     # Yandex Cloud Search API (ретроспективный поиск, docs/SPEC_yandex_search_discovery.md)
     yandex_search_api_key: str = ""
     yandex_search_folder_id: str = ""

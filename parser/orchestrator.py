@@ -29,13 +29,16 @@ from collections.abc import Callable, Iterable
 
 from sqlalchemy.orm import Session
 
+from config import get_settings
 from db.catalog import all_domains
+from db.enums import Priority
 from db.service import link_document_to_signal, recent_documents_with_titles, register_document_seen
 from parser.classifier import Classifier
 from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_title
 from parser.fetcher import SourceUnavailable
 from parser.filters import is_domain_whitelisted, is_excluded_path
 from parser.llm import ClassifierLLMClient, get_default_client
+from parser.llm_priority import apply_refinements, chunk_signal_ids, log_refinement, refine_priorities_batch
 from parser.models import Publication
 from parser.signals import build_signal
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
@@ -62,6 +65,10 @@ class SourceRunResult:
     irrelevant: int = 0
     excluded: int = 0
     error: str | None = None
+    # PLAN.md Фаза 11 / docs/SPEC_llm_priority.md: id сигналов этого источника с
+    # regex-приоритетом MEDIUM/LOW, созданных за этот прогон — материал для
+    # LLM-приоритизации после основного цикла (`run_all`), HIGH туда не попадает.
+    medium_low_signal_ids: list[int] = dataclasses.field(default_factory=list)
 
 
 def build_source_specs(*, ru_proxy_url: str | None = None) -> list[SourceSpec]:
@@ -227,11 +234,37 @@ def _process_publication(
         link_document_to_signal(session, document, signal_id=signal.id)
         result.new_signals += 1
         log.debug("  -> сигнал создан, id=%s", signal.id)
+        if signal.priority in (Priority.MEDIUM, Priority.LOW):
+            result.medium_low_signal_ids.append(signal.id)
     else:
         result.irrelevant += 1
 
 
 _UNSET = object()  # отличает "llm_client не передан" (взять get_default_client()) от "явно None"
+# Отличает "llm_priority_apply не передан" (взять config.get_settings()) от явного True/False
+# (спека `docs/SPEC_llm_priority.md`, тот же приём, что и `_UNSET` выше).
+_APPLY_UNSET = object()
+
+
+def _refine_priorities(
+    session: Session,
+    signal_ids: list[int],
+    llm_client: ClassifierLLMClient | None,
+    *,
+    apply: bool,
+) -> None:
+    """PLAN.md Фаза 11: второй проход LLM-приоритизации поверх MEDIUM/LOW сигналов
+    текущего прогона, после основного цикла по источникам (докстринг `run_all`).
+    По умолчанию (`apply=False`) — только структурированный лог "would change",
+    БД не меняется (спека, раздел «Аудит»: неделя наблюдения перед `--apply`/
+    `LLM_PRIORITY_APPLY=1`)."""
+    for chunk in chunk_signal_ids(signal_ids):
+        refinements = refine_priorities_batch(session, chunk, llm_client)
+        if apply:
+            apply_refinements(session, refinements)
+        for refinement in refinements:
+            log_refinement(refinement, applied=apply)
+        session.commit()
 
 
 def run_all(
@@ -242,18 +275,29 @@ def run_all(
     ru_proxy_url: str | None = None,
     now: dt.datetime | None = None,
     llm_client: ClassifierLLMClient | None = _UNSET,  # type: ignore[assignment]
+    llm_priority_apply: bool | None = _APPLY_UNSET,  # type: ignore[assignment]
 ) -> list[SourceRunResult]:
     """Обходит все источники по очереди; сбой одного не прерывает обход остальных
     (AGENTS.md раздел 12). Коммитит после каждого источника — частичный сбой не
     откатывает уже обработанные.
 
-    `llm_client` — вторичный дедуп по содержанию (docs/SPEC_content_dedup.md). По
-    умолчанию не передан — берётся `parser.llm.get_default_client()` (`None`, если GLM
-    не сконфигурирован — LLM необязателен). Явный `llm_client=None` отключает LLM-
-    сравнение (используется в тестах для детерминированности)."""
+    `llm_client` — вторичный дедуп по содержанию (docs/SPEC_content_dedup.md) И
+    LLM-приоритизация (PLAN.md Фаза 11, ниже) — один и тот же клиент на оба назначения.
+    По умолчанию не передан — берётся `parser.llm.get_default_client()` (`None`, если GLM
+    не сконфигурирован — LLM необязателен). Явный `llm_client=None` отключает оба
+    LLM-прохода (используется в тестах для детерминированности).
+
+    После основного цикла по источникам — второй проход LLM-приоритизации
+    (`docs/SPEC_llm_priority.md`) поверх MEDIUM/LOW сигналов этого прогона (собраны в
+    `SourceRunResult.medium_low_signal_ids`), чанками по `parser.llm_priority.
+    DEFAULT_CHUNK_SIZE`. `llm_priority_apply` по умолчанию не передан — берётся
+    `config.get_settings().llm_priority_apply` (`False`, пока `LLM_PRIORITY_APPLY` не
+    задан в `.env` — только лог "would change", БД не меняется)."""
     classifier = classifier or Classifier.load()
     if llm_client is _UNSET:
         llm_client = get_default_client()
+    if llm_priority_apply is _APPLY_UNSET:
+        llm_priority_apply = get_settings().llm_priority_apply
     specs = list(specs) if specs is not None else [
         *build_source_specs(ru_proxy_url=ru_proxy_url),
         *build_other_source_specs(),
@@ -276,4 +320,9 @@ def run_all(
             result.irrelevant,
             result.excluded,
         )
+
+    medium_low_ids = [sid for result in results for sid in result.medium_low_signal_ids]
+    if medium_low_ids:
+        _refine_priorities(session, medium_low_ids, llm_client, apply=bool(llm_priority_apply))
+
     return results

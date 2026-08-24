@@ -825,40 +825,54 @@ RU-прокси, известная проблема) это был 100%-й fals
 
 Оценка: ~1 день. Весь диф в `bot/main.py`, без правок схемы БД.
 
-## Фаза 11 — LLM-приоритизация (второй этап после keywords)
+## Фаза 11 — LLM-приоритизация (второй этап после keywords) ✅ (2026-08-24)
 
 Источник: просьба Алексея 2026-08-24. Дизайн согласован с Claude —
 `docs/SPEC_llm_priority.md` (статус Agreed).
 
 **1. Модуль `parser/llm_priority.py`**
-- [ ] `refine_priorities_batch(session, signal_ids, llm_client)` по образцу
-      `parser/dedup.py`. Батч 15–25 сигналов, вход: id + title + summary (из
-      `Publication`) + regex-trace, ответ — JSON `[{"id","priority","reason"}]`,
-      построчная валидация, один ретрай, дальше fallback на regex.
-- [ ] Промпт «бизнес-аналитика» с явными критериями: суть события (новая мера >
+- [x] `refine_priorities_batch(session, signal_ids, llm_client)` по образцу
+      `parser/dedup.py`. Батч (чанки `DEFAULT_CHUNK_SIZE=20`), вход: id + title +
+      summary + regex-trace, ответ — JSON `[{"id","priority","reason"}]`, построчная
+      валидация, один ретрай, дальше fallback на regex. **Уточнение к спеке:** `Signal`
+      физически не хранит `summary` публикации (только `title` — как и в
+      `docs/SPEC_retroactive_signals_cleanup.md` про шаг D), поле появится при
+      следующей миграции — `_signal_summary()` пока всегда возвращает `None`, батч
+      реально работает в режиме «title + regex-trace»; regex-trace (категории/тип
+      события/регион) читается из уже сохранённых полей `Signal`, `priority_word_matches`
+      пересчитывается по `title` через `parser/ru_stem.find_matches`.
+- [x] Промпт «бизнес-аналитика» с явными критериями: суть события (новая мера >
       изменение суммы > изменение порядка > информационная) > денежная цифра >
       срок вступления в силу; уровень власти — уточняющий. Выход сразу high/medium/low.
 
 **2. Интеграция в orchestrator**
-- [ ] Вызов из `run_all` ПОСЛЕ основного цикла: собрать id сигналов прогона с
-      MEDIUM/LOW (расширить `SourceRunResult` — сейчас только счётчики), чанки,
-      прогнать, закоммитить. `classifier.py` не трогать; `llm_client=_UNSET` →
+- [x] Вызов из `run_all` ПОСЛЕ основного цикла: собрать id сигналов прогона с
+      MEDIUM/LOW (`SourceRunResult.medium_low_signal_ids`, новое поле), чанки,
+      прогнать, закоммитить. `classifier.py` не тронут; `llm_client=_UNSET` →
       `get_default_client()` — тесты с `None` не затронуты.
 
 **3. Комбинирование**
-- [ ] LLM сдвигает максимум на один уровень (low↔medium, medium↔high), не заменяет.
-      Скачок low→high не применяется — лог расхождений. Источник приоритета
-      (`regex`/`llm_adjusted`) в структурированном логе.
+- [x] LLM сдвигает максимум на один уровень (low↔medium, medium↔high), не заменяет.
+      Скачок low→high не применяется — лог расхождений (`PriorityRefinement.discrepancy`).
+      Источник приоритета (`regex`/`llm_adjusted`) в структурированном логе
+      (`log_refinement`/`PriorityRefinement.format()`, аналог `ClassificationTrace.format()`).
 
 **4. Аудит перед включением на проде**
-- [ ] Режим «только лог, не применять» + флаг `--apply` (паттерн `cleanup_signals.py`).
-- [ ] `scripts/audit_priority.py`: сверка regex vs LLM с решениями эксперта
-      (REJECTED/SENT_TO_AGENT, время NEW→IN_WORK по `status_history`).
+- [x] Режим «только лог, не применять» по умолчанию + `config.Settings.llm_priority_apply`
+      (`.env` `LLM_PRIORITY_APPLY=1`) — паттерн `cleanup_signals.py`, но флаг читается
+      из настроек, а не CLI-аргумента `run_all` (вызывается из планировщика, не CLI).
+- [x] `scripts/audit_priority.py`: сверка regex vs LLM с решениями эксперта (по статусу
+      сигнала) и временем `NEW→IN_PROGRESS` по `status_history`. Только чтение, без
+      `--apply` (сам по себе не пишет в БД — `refine_priorities_batch`/
+      `apply_refinements` разделены, здесь используется только первая).
 - [ ] Неделя в log-only на реальном потоке → решение о `--apply`.
+      <!-- BLOCKED: требует запуска на боевом потоке пользователем, не решается кодом. -->
 
 **5. Тесты**
-- [ ] Батч-парсер (валидный/битый/частичный JSON), сдвиг на один уровень,
-      fallback при LLMError, интеграция с `run_all` — в `tests/test_llm_priority.py`.
+- [x] Батч-парсер (валидный/битый/частичный JSON), сдвиг на один уровень, low→high не
+      применяется, fallback при LLMError, интеграция с `run_all` (`llm_client=None` и
+      фейковый клиент), log-only не меняет БД, `--apply`/`llm_priority_apply=True`
+      меняет — `tests/test_llm_priority.py`, 16 новых тестов.
 
 Оценка: ~1.5 дня. Без миграции схемы БД.
 
