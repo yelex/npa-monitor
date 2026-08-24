@@ -64,6 +64,16 @@ def test_dobrovolec_exact_form_still_matches() -> None:
     assert contains_keyword("доброволец подписал контракт", ("доброволец",)) is True
 
 
+def test_novyi_matches_declined_forms() -> None:
+    """PLAN.md Фаза 9 п.5 / docs/SPEC_priority_substance_markers.md: стандартная
+    обрезка (5 букв -> минус 1) давала стем «новы», не покрывающий «новую»/«новое»/
+    «новых» — реальный пример из дампа пилота («…ввели новую меру поддержки…»)."""
+    assert contains_keyword("в регионе ввели новую меру поддержки", ("новый",)) is True
+    assert contains_keyword("подписано новое постановление", ("новый",)) is True
+    assert contains_keyword("утверждены новые правила", ("новый",)) is True
+    assert contains_keyword("новый указ подписан", ("новый",)) is True
+
+
 def test_find_matches_returns_matched_keywords() -> None:
     text = "получили компенсацию и новую субсидию"
     assert find_matches(text, ("компенсация", "субсидия", "льгота")) == ("компенсация", "субсидия")

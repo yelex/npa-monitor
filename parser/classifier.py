@@ -16,10 +16,16 @@ MVP — детерминированные keyword-правила, без LLM в
   `data/keywords.yaml::event_type_markers` составлена реализатором.
 - **Приоритизация** (раздел 7) — «есть ссылка на документ» трактуется как «в тексте
   есть маркер документа» (5.3), а не как «есть URL публикации» (URL есть всегда, иначе
-  не было бы `Publication`). Без маркера документа — низкий приоритет (раздел 7:
-  «аналитика, обзор... без указания на конкретный документ»). Регион «Не определён» —
-  принудительно средний приоритет (раздел 4.1), даже если остальные признаки указывали
-  бы на высокий.
+  не было бы `Publication`). Регион «Не определён» — принудительно средний приоритет
+  (раздел 4.1), даже если остальные признаки указывали бы на высокий. **Уточнено
+  2026-08-24** (PLAN.md Фаза 9 п.5, `docs/SPEC_priority_substance_markers.md`): низкий
+  приоритет — только если в тексте нет **ни** маркера документа (5.3), **ни** слова
+  из `priority_high_words` (раздел 7 — «новый»/«изменение»/«отмена»/… — тот же список,
+  что и раньше поднимал MEDIUM→HIGH); раньше проверялся только маркер документа, и
+  явная формулировка вроде «ввели новую меру поддержки» без слова «постановление»/
+  «указ»/… уходила в LOW, хотя `priority_high_words` совпадал бы, если бы его вообще
+  проверили на этом этапе. HIGH по-прежнему требует **обоих** списков сразу — гейт
+  расширился, порог для HIGH не изменился.
 
 Сопоставление ключевых слов — через `parser/ru_stem.py` (допуск на падежные/числовые
 словоформы, не точная подстрока) — см. докстринг того модуля: точное совпадение
@@ -166,11 +172,13 @@ def detect_region(
 
 def detect_priority(text: str, keywords: ClassificationKeywords, region: Region) -> Priority:
     text_lower = text.lower()
-    if not _contains_any(text_lower, keywords.document_markers):
+    has_document_marker = _contains_any(text_lower, keywords.document_markers)
+    has_priority_word = _contains_any(text_lower, keywords.priority_high_words)
+    if not has_document_marker and not has_priority_word:
         return Priority.LOW
     if region == Region.UNDEFINED:
         return Priority.MEDIUM
-    if _contains_any(text_lower, keywords.priority_high_words):
+    if has_document_marker and has_priority_word:
         return Priority.HIGH
     return Priority.MEDIUM
 

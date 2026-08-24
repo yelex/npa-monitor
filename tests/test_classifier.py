@@ -88,6 +88,28 @@ def test_low_priority_without_document_marker() -> None:
     assert result.priority == Priority.LOW
 
 
+def test_medium_priority_from_priority_word_without_document_marker() -> None:
+    # PLAN.md Фаза 9 п.5 / docs/SPEC_priority_substance_markers.md: регрессия на
+    # сигнал [30] дампа пилота — «ввели новую меру поддержки» без слова
+    # «постановление»/«указ»/… раньше уходило в low, хотя явно описывает новую меру.
+    pub = _publication(
+        "rg.ru", "Евгений Солнцев: в Оренбуржье ввели новую меру поддержки участникам СВО"
+    )
+    result = CLASSIFIER.classify(pub)
+    assert result.region == Region.UNDEFINED
+    assert result.priority == Priority.MEDIUM
+
+
+def test_medium_priority_from_priority_word_without_document_marker_when_region_known() -> None:
+    # HIGH по-прежнему требует ОБОИХ признаков сразу (раздел 7 AGENTS.md) — только
+    # priority_high_words без маркера документа поднимает не выше medium, даже при
+    # известном регионе.
+    pub = _publication("sfr.gov.ru/press_center/news", "ветеран боевых действий новая выплата")
+    result = CLASSIFIER.classify(pub)
+    assert result.region == Region.RF
+    assert result.priority == Priority.MEDIUM
+
+
 # --- Регион ---
 
 
