@@ -71,6 +71,100 @@ def _make_in_progress_signal(**overrides) -> int:
     return sig_id
 
 
+# --- Флоу ссылка на НПА -> ЖС -> регион: FakeState + шаговые helper'ы ---
+#
+# docs/SPEC_analyst_confirm_ls_region.md: флоу теперь трёхшаговый (on_npa_link
+# переводит в ask_categories, а не сразу в SENT_TO_AGENT), каждый следующий шаг читает
+# данные, записанные предыдущим (`state.update_data(categories=..., npa_link=...)`).
+# AsyncMock с фиксированным `get_data(return_value=...)` (как было в тестах до Фазы 10)
+# для такой цепочки не годится — не отражает изменения между шагами. FakeState — минимальная
+# реализация протокола FSMContext (get_data/update_data/set_state/clear) поверх обычного dict.
+
+
+class FakeState:
+    def __init__(self, data: dict | None = None) -> None:
+        self._data = dict(data or {})
+        self.current_state = None
+        self.get_data = AsyncMock(side_effect=self._get_data)
+        self.update_data = AsyncMock(side_effect=self._update_data)
+        self.set_state = AsyncMock(side_effect=self._set_state)
+        self.clear = AsyncMock(side_effect=self._clear)
+
+    async def _get_data(self) -> dict:
+        return dict(self._data)
+
+    async def _update_data(self, **kwargs) -> None:
+        self._data.update(kwargs)
+
+    async def _set_state(self, state) -> None:
+        self.current_state = state
+
+    async def _clear(self) -> None:
+        self._data = {}
+        self.current_state = None
+
+
+async def _send_npa_link(sig_id: int, state: FakeState, text: str, *, user_id: int = 111) -> MagicMock:
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = text
+    message.answer = AsyncMock()
+    await bot_main.on_npa_link(message, state)
+    return message
+
+
+async def _toggle_category(sig_id: int, state: FakeState, code: str, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"catc:{sig_id}:{code}"
+    cb.message.edit_reply_markup = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_category_toggle(cb, state)
+    return cb
+
+
+async def _confirm_categories(sig_id: int, state: FakeState, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"catc:{sig_id}:confirm"
+    cb.message.edit_text = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_category_toggle(cb, state)
+    return cb
+
+
+async def _confirm_region(sig_id: int, state: FakeState, code: str, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"reg:{sig_id}:{code}"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_region_button(cb, state)
+    return cb
+
+
+async def _search_region(sig_id: int, state: FakeState, query: str, *, user_id: int = 111) -> MagicMock:
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = query
+    message.answer = AsyncMock()
+    await bot_main.on_region_manual(message, state)
+    return message
+
+
+async def _run_full_npa_flow(
+    sig_id: int, *, link_text: str = "skip", region_code: str = "rf", user_id: int = 111
+) -> tuple[FakeState, MagicMock, MagicMock, MagicMock]:
+    """Полный проход флоу: ссылка -> подтверждение ЖС (дефолтный предвыбор
+    классификатора, без ручного toggle) -> подтверждение региона кнопкой. Для тестов,
+    которым важен только конечный результат (SENT_TO_AGENT)."""
+    state = FakeState({"sig_id": sig_id})
+    message = await _send_npa_link(sig_id, state, link_text, user_id=user_id)
+    cb_confirm = await _confirm_categories(sig_id, state, user_id=user_id)
+    cb_region = await _confirm_region(sig_id, state, region_code, user_id=user_id)
+    return state, message, cb_confirm, cb_region
+
+
 # --- Чистые функции ---
 
 
@@ -436,15 +530,18 @@ async def test_cmd_complete_rejects_invalid_transition_from_new() -> None:
 
 
 async def test_on_npa_link_skip_transitions_without_touching_link(monkeypatch) -> None:
+    """'skip' проходит те же шаги, что и обычная ссылка: сначала подтверждение ЖС/
+    региона (SPEC_analyst_confirm_ls_region.md), только потом SENT_TO_AGENT."""
     sig_id = _make_in_progress_signal()
-    state = AsyncMock()
-    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
-    message = MagicMock()
-    message.from_user.id = 111
-    message.text = "skip"
-    message.answer = AsyncMock()
+    state = FakeState({"sig_id": sig_id})
+    message = await _send_npa_link(sig_id, state, "skip")
 
-    await bot_main.on_npa_link(message, state)
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # ждёт подтверждения ЖС/региона
+    message.answer.assert_awaited_once()
+    assert "ЖС" in message.answer.await_args.args[0]
+
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
 
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
@@ -493,14 +590,12 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
     sent = MagicMock()
     monkeypatch.setattr(bot_main._autoupdate_client, "send", sent)
-    state = AsyncMock()
-    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
-    message = MagicMock()
-    message.from_user.id = 111
-    message.text = "https://sfr.gov.ru/document/1"
-    message.answer = AsyncMock()
+    state = FakeState({"sig_id": sig_id})
 
-    await bot_main.on_npa_link(message, state)
+    await _send_npa_link(sig_id, state, "https://sfr.gov.ru/document/1")
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # ждёт подтверждения ЖС/региона
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
 
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
@@ -523,18 +618,15 @@ async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_c
     monkeypatch.setattr(bot_main, "fetch", fetch_mock)
     sent = MagicMock()
     monkeypatch.setattr(bot_main._autoupdate_client, "send", sent)
-    state = AsyncMock()
-    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
-    message = MagicMock()
-    message.from_user.id = 111
-    message.text = "https://docs.cntd.ru/document/408415942"
-    message.answer = AsyncMock()
+    state = FakeState({"sig_id": sig_id})
 
-    await bot_main.on_npa_link(message, state)
+    await _send_npa_link(sig_id, state, "https://docs.cntd.ru/document/408415942")
+    await _confirm_categories(sig_id, state)
+    cb_region = await _confirm_region(sig_id, state, "rf")
 
     fetch_mock.assert_not_called()
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
-    assert "автопроверку" in message.answer.await_args.args[0]
+    assert "автопроверку" in cb_region.message.answer.await_args.args[0]
     sent.assert_called_once_with("https://docs.cntd.ru/document/408415942", None)
 
 
@@ -565,6 +657,9 @@ async def test_on_npa_link_uses_ru_proxy_access_for_ru_proxy_domain(monkeypatch)
 async def test_on_npa_link_shows_message_instead_of_crashing_when_already_sent_to_agent(
     monkeypatch,
 ) -> None:
+    """on_npa_link больше не переводит статус сам (это финальный шаг после ЖС/региона,
+    `_finish_npa_flow`) — гонка «уже отправлено» обнаруживается только там, на
+    `transition_status` в SENT_TO_AGENT."""
     sig_id = _make_in_progress_signal()
     factory = bot_main.get_session_factory()
     with factory() as session:
@@ -574,18 +669,154 @@ async def test_on_npa_link_shows_message_instead_of_crashing_when_already_sent_t
         transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
         session.commit()
     monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
-    state = AsyncMock()
-    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
-    message = MagicMock()
-    message.from_user.id = 111
-    message.text = "https://sfr.gov.ru/document/1"
-    message.answer = AsyncMock()
+    state = FakeState({"sig_id": sig_id})
 
-    await bot_main.on_npa_link(message, state)
+    await _send_npa_link(sig_id, state, "https://sfr.gov.ru/document/1")
+    await _confirm_categories(sig_id, state)
+    cb_region = await _confirm_region(sig_id, state, "rf")
 
-    message.answer.assert_awaited_once()
-    assert "уже в статусе" in message.answer.await_args.args[0]
+    assert "уже в статусе" in cb_region.message.answer.await_args.args[0]
     state.clear.assert_awaited_once()
+
+
+# --- on_category_toggle: toggle ЖС, подтверждение пустого набора ---
+
+
+async def test_on_category_toggle_toggles_selection_on_and_off() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS])
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    data = await state.get_data()
+    assert data["categories"] == ["veterans"]  # предвыбор из классификатора
+
+    await _toggle_category(sig_id, state, "veterans")  # снимаем предвыбор
+    await _toggle_category(sig_id, state, "disabled")  # включаем другую ЖС
+
+    data = await state.get_data()
+    assert sorted(data["categories"]) == ["disabled"]
+
+
+async def test_on_category_toggle_confirm_blocks_empty_selection() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS])
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _toggle_category(sig_id, state, "veterans")  # снимаем единственный предвыбор
+
+    cb = await _confirm_categories(sig_id, state)
+
+    cb.answer.assert_awaited_once_with("Выберите хотя бы одну ЖС", show_alert=True)
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # дальше не продвинулись
+
+
+# --- on_region_button / on_region_manual: выбор региона кнопкой и поиском по справочнику ---
+
+
+async def test_on_region_button_selects_region_and_reaches_sent_to_agent() -> None:
+    sig_id = _make_in_progress_signal()
+
+    state, message, cb_confirm, cb_region = await _run_full_npa_flow(sig_id, region_code="moscow")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        assert session.get(bot_main.Signal, sig_id).region == Region.MOSCOW
+    assert "Передан агенту" in cb_region.message.answer.await_args.args[0]
+
+
+def _region_search_fixture() -> tuple:
+    """Фикстура с намеренно пересекающимися названиями («Москва» / «Московская
+    область») — независимо от реального содержимого data/regions.yaml проверяет три
+    исхода `find_region_matches`/`on_region_manual`: 0, 1, 2+ совпадений."""
+    return (
+        bot_main.RegionEntry(code="moscow", name="Москва", region=Region.MOSCOW, sources=()),
+        bot_main.RegionEntry(code="moscow_obl", name="Московская область", region=Region.UNDEFINED, sources=()),
+    )
+
+
+def test_find_region_matches_zero_one_and_multiple(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _region_search_fixture)
+
+    assert bot_main.find_region_matches("Атлантида") == []
+    assert [r.code for r in bot_main.find_region_matches("Москва")] == ["moscow"]
+    assert {r.code for r in bot_main.find_region_matches("моск")} == {"moscow", "moscow_obl"}
+
+
+async def test_on_region_manual_zero_matches_asks_to_retry(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _region_search_fixture)
+    sig_id = _make_in_progress_signal()
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "other")
+
+    message = await _search_region(sig_id, state, "Атлантида")
+
+    assert "не найден" in message.answer.await_args.args[0]
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
+
+
+async def test_on_region_manual_single_match_finishes_flow(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _region_search_fixture)
+    sig_id = _make_in_progress_signal()
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "other")
+
+    message = await _search_region(sig_id, state, "Москва")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        assert session.get(bot_main.Signal, sig_id).region == Region.MOSCOW
+
+
+async def test_on_region_manual_multiple_matches_asks_to_narrow(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _region_search_fixture)
+    sig_id = _make_in_progress_signal()
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "other")
+
+    message = await _search_region(sig_id, state, "моск")
+
+    assert "уточните" in message.answer.await_args.args[0]
+    assert "Москва" in message.answer.await_args.args[0]
+    assert "Московская область" in message.answer.await_args.args[0]
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
+
+
+# --- аудит расхождения классификатора с подтверждением аналитика (StatusHistory.reason) ---
+
+
+async def test_finish_npa_flow_records_audit_reason_on_divergence() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+
+    await _run_full_npa_flow(sig_id, region_code="moscow")  # аналитик поменял регион
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        last = signal.history[-1]
+        assert last.to_status == SignalStatus.SENT_TO_AGENT
+        assert last.reason is not None
+        assert "region=rf" in last.reason
+        assert "confirmed=" in last.reason
+        assert "region=moscow" in last.reason
+
+
+async def test_finish_npa_flow_no_audit_reason_without_divergence() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+
+    await _run_full_npa_flow(sig_id, region_code="rf")  # подтверждение = классификатор один в один
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        last = signal.history[-1]
+        assert last.to_status == SignalStatus.SENT_TO_AGENT
+        assert last.reason is None
 
 
 async def test_cmd_today_ignores_unauthorized_user() -> None:

@@ -82,15 +82,45 @@ async def test_happy_path_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     with factory() as session:
         assert session.get(Signal, sig_id).status == SignalStatus.IN_PROGRESS
 
-    # --- 4. Эксперт присылает ссылку на НПА — принимается, статус "Передан агенту" ---
+    # --- 4. Эксперт присылает ссылку на НПА -> подтверждает ЖС -> подтверждает регион
+    # -> статус "Передан агенту" (SPEC_analyst_confirm_ls_region.md, PLAN.md Фазы 10-11:
+    # аналитик подтверждает ЖС/регион отдельными шагами перед передачей агенту) ---
     monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))  # ссылка "доступна"
-    npa_state = AsyncMock()
-    npa_state.get_data = AsyncMock(return_value={"sig_id": sig_id})
+
+    class _FakeState:
+        """Мини-FSMContext: следующий шаг флоу читает данные, записанные предыдущим —
+        AsyncMock с фиксированным get_data() для такой цепочки не годится."""
+
+        def __init__(self, data: dict) -> None:
+            self._data = dict(data)
+            self.get_data = AsyncMock(side_effect=lambda: self._data.copy())
+            self.update_data = AsyncMock(side_effect=lambda **kw: self._data.update(kw))
+            self.set_state = AsyncMock()
+            self.clear = AsyncMock()
+
+    npa_state = _FakeState({"sig_id": sig_id})
     message = MagicMock()
     message.from_user.id = 111
     message.text = "https://sfr.gov.ru/document/happy-path-npa"
     message.answer = AsyncMock()
     await bot_main.on_npa_link(message, npa_state)
+
+    with factory() as session:
+        assert session.get(Signal, sig_id).status == SignalStatus.IN_PROGRESS  # ждёт ЖС/региона
+
+    cb_confirm = MagicMock()
+    cb_confirm.from_user.id = 111
+    cb_confirm.data = f"catc:{sig_id}:confirm"
+    cb_confirm.message.edit_text = AsyncMock()
+    cb_confirm.answer = AsyncMock()
+    await bot_main.on_category_toggle(cb_confirm, npa_state)
+
+    cb_region = MagicMock()
+    cb_region.from_user.id = 111
+    cb_region.data = f"reg:{sig_id}:rf"
+    cb_region.message.answer = AsyncMock()
+    cb_region.answer = AsyncMock()
+    await bot_main.on_region_button(cb_region, npa_state)
 
     with factory() as session:
         signal = session.get(Signal, sig_id)

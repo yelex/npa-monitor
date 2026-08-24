@@ -26,9 +26,9 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from bot.autoupdate_client import AutoUpdateAgentClient
 from config import get_settings
-from db.catalog import access_for_domain, all_domains
-from db.enums import Priority, RejectionReason, SignalStatus
-from db.models import Signal
+from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
+from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.models import Signal, SignalCategoryLink
 from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.fetcher import SourceUnavailable, fetch
@@ -84,6 +84,10 @@ REJECT_REASONS = {
 class NpaFlow(StatesGroup):
     ask_npa_link = State()
     ask_reject_reason = State()
+    # docs/SPEC_analyst_confirm_ls_region.md: подтверждение ЖС и региона аналитиком
+    # после ссылки на НПА и перед SENT_TO_AGENT — два дополнительных шага одного флоу.
+    ask_categories = State()
+    ask_region = State()
 
 
 # --- Auth --------------------------------------------------------------------
@@ -132,6 +136,32 @@ def reject_kb(sig_id: int) -> InlineKeyboardMarkup:
     row = [InlineKeyboardButton(text=label, callback_data=f"rej:{sig_id}:{code}")
            for code, label in REJECT_REASONS.items()]
     return InlineKeyboardMarkup(inline_keyboard=[row[:2], row[2:]])
+
+
+def category_toggle_kb(sig_id: int, selected: set[str]) -> InlineKeyboardMarkup:
+    """SPEC п.2: toggle ✅/⬜ по каждой ЖС (паттерн `priority_filter_kb`) + «Подтвердить»
+    отдельной строкой. `selected` — предвыбор из `signal.categories` (классификатор)."""
+    rows = [
+        [InlineKeyboardButton(
+            text=f"{'✅' if code in selected else '⬜'} {label}",
+            callback_data=f"catc:{sig_id}:{code}",
+        )]
+        for code, label in CATEGORY_LABELS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="Подтвердить", callback_data=f"catc:{sig_id}:confirm")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def region_kb(sig_id: int) -> InlineKeyboardMarkup:
+    """SPEC п.3: кнопки РФ/Москва/Не определён + «Другое» (свободный текст, обрабатывает
+    `on_region_manual`)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=REGION_LABELS[code], callback_data=f"reg:{sig_id}:{code}")
+            for code in ("rf", "moscow", "undefined")
+        ],
+        [InlineKeyboardButton(text="Другое", callback_data=f"reg:{sig_id}:other")],
+    ])
 
 
 # Порядок и коды сортировки/фильтра по приоритету в кнопках под списком сигналов
@@ -504,11 +534,15 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
-# --- FSM: ссылка на НПА --------------------------------------------------------
+# --- FSM: ссылка на НПА -> ЖС -> регион -----------------------------------------
 
 
 @router.message(NpaFlow.ask_npa_link)
 async def on_npa_link(message: Message, state: FSMContext) -> None:
+    """SPEC_analyst_confirm_ls_region.md решение 1: терминальная логика (DB-коммит +
+    transition_status + send агенту) сюда больше не входит — переехала в
+    `_finish_npa_flow`, финальный шаг после подтверждения ЖС и региона. Здесь только
+    приём и проверка ссылки, дальше — саджест ЖС из классификатора (`ask_categories`)."""
     if not is_allowed(message.from_user.id):
         return
     data = await state.get_data()
@@ -550,19 +584,110 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
                 return
             npa_link = text
 
-    db_factory = get_session_factory()
-    with db_factory() as db:
+    with get_session_factory()() as db:
         s = db.get(Signal, sig_id)
         if not s:
             await message.answer("Сигнал исчез.")
             await state.clear()
             return
+        # Предвыбор toggle-кнопок — текущие категории классификатора (SPEC п.2).
+        preselected = sorted({c.category.value for c in s.categories})
+
+    await state.update_data(npa_link=npa_link, autocheck_skipped=autocheck_skipped, categories=preselected)
+    await state.set_state(NpaFlow.ask_categories)
+    await message.answer(
+        "Ссылка принята. Подтвердите ЖС (жизненную ситуацию):",
+        reply_markup=category_toggle_kb(sig_id, set(preselected)),
+    )
+
+
+@router.callback_query(F.data.startswith("catc:"))
+async def on_category_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    """SPEC п.2: `catc:<sig>:<code>` — toggle категории, `catc:<sig>:confirm` — переход
+    к шагу региона (пустой набор блокируется alert'ом, БД не трогается до финального шага)."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, code = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    data = await state.get_data()
+    selected = set(data.get("categories", []))
+
+    if code == "confirm":
+        if not selected:
+            await cb.answer("Выберите хотя бы одну ЖС", show_alert=True)
+            return
+        await state.set_state(NpaFlow.ask_region)
+        await cb.message.edit_text(  # type: ignore[union-attr]
+            "ЖС подтверждены. Выберите регион:", reply_markup=region_kb(sig_id)
+        )
+        await cb.answer()
+        return
+
+    if code in selected:
+        selected.discard(code)
+    else:
+        selected.add(code)
+    await state.update_data(categories=sorted(selected))
+    await cb.message.edit_reply_markup(reply_markup=category_toggle_kb(sig_id, selected))  # type: ignore[union-attr]
+    await cb.answer()
+
+
+def find_region_matches(query: str) -> list[RegionEntry]:
+    """SPEC п.3: поиск по `db.catalog.load_regions()` (casefold, подстрока по name/code).
+    Новый `Region` на лету не создаём — источник истины справочник `data/regions.yaml`."""
+    q = query.strip().casefold()
+    if not q:
+        return []
+    return [r for r in load_regions() if q in r.name.casefold() or q in r.code.casefold()]
+
+
+def _audit_reason(
+    old_categories: list[str], old_region: Region, new_categories: list[str], new_region: Region
+) -> str | None:
+    """SPEC п.5/решение 5: расхождение классификатора с подтверждением аналитика —
+    в `StatusHistory.reason`, grep-able формат `classifier=... region=... -> confirmed=...`.
+    Без расхождения — `None` (запись не пишем)."""
+    if sorted(old_categories) == sorted(new_categories) and old_region == new_region:
+        return None
+    return (
+        f"classifier={','.join(sorted(old_categories)) or 'none'} region={old_region.value} -> "
+        f"confirmed={','.join(sorted(new_categories)) or 'none'} region={new_region.value}"
+    )
+
+
+async def _finish_npa_flow(
+    target: Message, state: FSMContext, sig_id: int, region: Region, *, changed_by: int
+) -> None:
+    """Финальный шаг флоу (SPEC решение 1): одна DB-сессия — npa_link, перезапись
+    `signal_categories`/`Signal.region` подтверждёнными значениями, `transition_status`
+    в SENT_TO_AGENT (с аудитом расхождения), commit, `_autoupdate_client.send`, ответ
+    аналитику, `state.clear()`. `target` — объект с `.answer()` (Message или
+    `CallbackQuery.message`), гонки статусов — как в остальном коде (try/except)."""
+    data = await state.get_data()
+    categories: list[str] = data.get("categories", [])
+    npa_link: str | None = data.get("npa_link")
+    autocheck_skipped: bool = data.get("autocheck_skipped", False)
+
+    with get_session_factory()() as db:
+        s = db.get(Signal, sig_id)
+        if not s:
+            await target.answer("Сигнал исчез.")
+            await state.clear()
+            return
         if npa_link is not None:
             s.npa_link = npa_link
+
+        old_categories = sorted(c.category.value for c in s.categories)
+        old_region = s.region
+        s.categories = [SignalCategoryLink(category=SignalCategory(c)) for c in categories]
+        s.region = region
+        reason = _audit_reason(old_categories, old_region, categories, region)
+
         try:
-            transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=message.from_user.id)
+            transition_status(db, s, SignalStatus.SENT_TO_AGENT, changed_by=changed_by, reason=reason)
         except InvalidStatusTransition:
-            await message.answer(
+            await target.answer(
                 f"Сигнал уже в статусе «{STATUS_LABELS.get(s.status, s.status)}» — "
                 "возможно, кто-то уже отправил ссылку раньше."
             )
@@ -573,13 +698,56 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
 
     if autocheck_skipped:
-        await message.answer(
-            f"✅ Ссылка принята (домен {domain_of(text)} не поддерживает автопроверку, "
+        domain = domain_of(npa_link) if npa_link else ""
+        await target.answer(
+            f"✅ Ссылка принята (домен {domain} не поддерживает автопроверку, "
             "проверьте вручную). Статус: Передан агенту."
         )
     else:
-        await message.answer("✅ Ссылка принята. Статус: Передан агенту.")
+        await target.answer("✅ Ссылка принята. Статус: Передан агенту.")
     await state.clear()
+
+
+@router.callback_query(F.data.startswith("reg:"))
+async def on_region_button(cb: CallbackQuery, state: FSMContext) -> None:
+    """SPEC п.3: РФ/Москва/Не определён — сразу финальный шаг; «Другое» — просит текст,
+    обрабатывает `on_region_manual` в том же состоянии `ask_region`."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, code = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    if code == "other":
+        await cb.message.answer("Введите название региона (или часть) текстом.")  # type: ignore[union-attr]
+        await cb.answer()
+        return
+    await _finish_npa_flow(cb.message, state, sig_id, Region(code), changed_by=cb.from_user.id)  # type: ignore[arg-type]
+    await cb.answer()
+
+
+@router.message(NpaFlow.ask_region)
+async def on_region_manual(message: Message, state: FSMContext) -> None:
+    """Свободный текст в состоянии `ask_region` — поиск по справочнику (SPEC п.3):
+    1 матч принимается сразу, 0 — «не найден», 2+ — список кандидатов на уточнение."""
+    if not is_allowed(message.from_user.id):
+        return
+    data = await state.get_data()
+    sig_id = data["sig_id"]
+    query = (message.text or "").strip()
+    matches = find_region_matches(query)
+
+    if not matches:
+        await message.answer(
+            "Регион не найден в справочнике. Попробуйте другой запрос или выберите "
+            "РФ/Москву/«Не определён» кнопкой выше."
+        )
+        return
+    if len(matches) > 1:
+        listing = "\n".join(f"• {r.name} ({r.code})" for r in matches)
+        await message.answer(f"Найдено несколько регионов, уточните запрос:\n{listing}")
+        return
+
+    await _finish_npa_flow(message, state, sig_id, matches[0].region, changed_by=message.from_user.id)
 
 
 # --- reminder ------------------------------------------------------------------
