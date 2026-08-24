@@ -200,6 +200,59 @@ def test_process_source_stops_scanning_page_at_first_stale_item(
     assert leftover.count() == 0
 
 
+def test_process_source_excludes_known_static_path_without_creating_signal(
+    session: Session, classifier: Classifier
+) -> None:
+    """PLAN.md Фаза 9 п.1 / docs/SPEC_stale_publications_filter.md: sfr.gov.ru/branches/*/info/
+    — статичные справочные страницы, не публикации о событии, не должны создавать сигнал
+    даже при релевантном тексте заголовка."""
+    publications = [
+        _pub(
+            "sfr.gov.ru/press_center/news",
+            "постановление ветеран боевых действий выплата",
+            "https://sfr.gov.ru/branches/77/info/~2026/08/20/1?info_category=3",
+            published_at=NOW,
+        )
+    ]
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.excluded == 1
+    assert result.new_signals == 0
+    assert session.query(Signal).count() == 0
+
+
+def test_process_source_stops_pagination_when_page_fully_undated(
+    session: Session, classifier: Classifier
+) -> None:
+    """Раньше отсутствие даты (`published_at is None`) полностью обходило проверку окна
+    — публикация без даты не останавливала пагинацию и обрабатывалась как обычная. Если
+    вся страница без дат, источник не может подтвердить, что дальше страницы попадают в
+    окно — обход останавливается (docs/SPEC_stale_publications_filter.md)."""
+    undated = _pub(
+        "kremlin.ru/acts/news",
+        "постановление ветеран боевых действий выплата",
+        "https://kremlin.ru/acts/news/1",
+        published_at=None,
+    )
+    call_count = 0
+
+    def fetch_page(page: int = 1) -> list[Publication]:
+        nonlocal call_count
+        call_count += 1
+        return [undated]  # каждая "страница" без дат — не должна запрашиваться повторно
+
+    spec = SourceSpec("kremlin.ru/acts/news", fetch_page)
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert call_count == 1  # остановились на первой же полностью недатированной странице
+    assert result.new_signals == 1  # сама публикация на этой странице всё же обработана
+
+
 def test_process_source_marks_unavailable_source_without_processing(
     session: Session, classifier: Classifier
 ) -> None:

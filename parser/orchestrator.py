@@ -33,7 +33,7 @@ from db.catalog import all_domains
 from db.service import register_document_seen
 from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable
-from parser.filters import is_domain_whitelisted
+from parser.filters import is_domain_whitelisted, is_excluded_path
 from parser.models import Publication
 from parser.signals import build_signal
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
@@ -58,6 +58,7 @@ class SourceRunResult:
     new_signals: int = 0
     duplicates: int = 0
     irrelevant: int = 0
+    excluded: int = 0
     error: str | None = None
 
 
@@ -126,7 +127,21 @@ def process_source(
                     break
                 _process_publication(session, classifier, pub, whitelisted_domains, result)
 
-            if reached_window_start or not spec.paginated:
+            # PLAN.md Фаза 9 п.1 / docs/SPEC_stale_publications_filter.md: если ни одна
+            # публикация на странице не дала машиночитаемую дату, проверка «старше окна»
+            # выше вообще не срабатывает — без этой защиты обход мог бы бесконтрольно
+            # углубляться в пагинацию на источниках, где разметка старых страниц не
+            # содержит даты (риск многолетних публикаций, прошедших как «новые»).
+            all_undated = bool(publications) and all(pub.published_at is None for pub in publications)
+            if all_undated:
+                log.warning(
+                    "источник %s: страница %d полностью без дат публикации — "
+                    "обход источника остановлен (не может подтвердить окно поиска)",
+                    spec.source_key,
+                    page,
+                )
+
+            if reached_window_start or all_undated or not spec.paginated:
                 break
     except SourceUnavailable as exc:
         # AGENTS.md раздел 12: «Источник недоступен — 3 попытки, затем пропуск до
@@ -159,6 +174,11 @@ def _process_publication(
 
     if not is_domain_whitelisted(pub.url, whitelisted_domains):
         log.debug("  домен не в белом списке источников — пропуск")
+        return
+
+    if is_excluded_path(pub.url):
+        result.excluded += 1
+        log.debug("  URL — известная статичная/справочная страница, не событие — пропуск")
         return
 
     _, created = register_document_seen(session, source_key=pub.source_key, doc_url=pub.url)
@@ -202,11 +222,12 @@ def run_all(
         session.commit()
         results.append(result)
         log.info(
-            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d",
+            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d",
             result.source_key,
             result.ok,
             result.new_signals,
             result.duplicates,
             result.irrelevant,
+            result.excluded,
         )
     return results

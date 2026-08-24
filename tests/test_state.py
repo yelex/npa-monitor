@@ -51,6 +51,22 @@ def test_fetch_window_start_carries_over_missed_days_not_just_24h(session: Sessi
     assert (now - window_start) > dt.timedelta(hours=24)
 
 
+def test_fetch_window_start_covers_skipped_weekend_when_run_monday_after_friday(
+    session: Session,
+) -> None:
+    """PLAN.md Фаза 9 п.1: окно поиска в понедельник (после невыполнявшегося за выходные
+    обхода) должно вести отсчёт от пятницы, а не от полуночи субботы/воскресенья/
+    понедельника — иначе публикации субботы-воскресенья потеряются."""
+    friday = dt.datetime(2026, 8, 14, 6, 0, tzinfo=dt.timezone.utc)
+    mark_source_processed(session, "sfr.gov.ru/press_center/news", success_at=friday)
+
+    monday = dt.datetime(2026, 8, 17, 6, 0, tzinfo=dt.timezone.utc)
+    window_start = fetch_window_start(session, "sfr.gov.ru/press_center/news", now=monday)
+
+    assert window_start == friday
+    assert (monday - window_start) == dt.timedelta(days=3)
+
+
 def test_mark_source_processed_updates_existing_record(session: Session) -> None:
     mark_source_processed(
         session, "mos.ru/authority/documents", success_at=dt.datetime(2026, 8, 18, tzinfo=dt.timezone.utc)

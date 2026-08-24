@@ -1,7 +1,7 @@
 """Тесты parser/filters.py, PLAN.md Фаза 3."""
 from __future__ import annotations
 
-from parser.filters import is_domain_whitelisted, is_text_content
+from parser.filters import is_domain_whitelisted, is_excluded_path, is_text_content
 
 WHITELIST = {"kremlin.ru", "sfr.gov.ru", "mos.ru"}
 
@@ -38,3 +38,15 @@ def test_is_text_content_rejects_video_and_missing_header() -> None:
     assert is_text_content("video/mp4") is False
     assert is_text_content(None) is False
     assert is_text_content("") is False
+
+
+def test_is_excluded_path_matches_sfr_branches_info() -> None:
+    """PLAN.md Фаза 9 п.1: sfr.gov.ru/branches/*/info/ — статичные справочные страницы
+    с рансующейся датой в URL, не публикации о событии, docs/SPEC_stale_publications_filter.md."""
+    assert is_excluded_path("https://sfr.gov.ru/branches/77/info/~2026/08/20/1?info_category=3") is True
+    assert is_excluded_path("https://www.sfr.gov.ru/branches/78/info/~2023/01/01/9") is True
+
+
+def test_is_excluded_path_does_not_match_regular_news() -> None:
+    assert is_excluded_path("https://sfr.gov.ru/press_center/news/~2026/08/19/284025") is False
+    assert is_excluded_path("https://kremlin.ru/acts/news/80518") is False
