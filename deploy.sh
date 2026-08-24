@@ -89,4 +89,4 @@ echo "   остановите его: kill \$(pgrep -f '.venv/bin/python -m bot'
 echo "2. IP сервера (${HOST}) должен быть в allow-листе RU-прокси (RU_PROXY_URL в .env)"
 echo "   для доступа к kremlin.ru/government.ru/publication.pravo.gov.ru — см. README,"
 echo "   раздел «Деплой», и AGENTS.md раздел 16 п.7. Проверить:"
-echo "   ${SSH[*]} 'cd ${REMOTE_DIR} && docker compose run --rm parser -v'"
+echo "   ${SSH[*]} 'cd ${REMOTE_DIR} && docker compose run --rm parser python -m parser -v'"
