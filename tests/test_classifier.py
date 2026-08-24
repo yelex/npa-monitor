@@ -54,6 +54,32 @@ def test_multiple_categories_matched_simultaneously() -> None:
     assert set(result.categories) == {SignalCategory.VETERANS, SignalCategory.SVO}
 
 
+def test_veterans_matches_full_form_specialnaya_voennaya_operatsiya() -> None:
+    # PLAN.md Фаза 9 п.8 / docs/SPEC_svo_full_form_keywords.md: сигнал [7] из сверки
+    # audit_rejected_signals.py — «ветеран СВО» в справочнике не покрывал полную форму.
+    pub = _publication(
+        "sfr.gov.ru/press_center/news",
+        "Ветераны специальной военной операции могут досрочно выбрать форму получения "
+        "набора социальных услуг",
+    )
+    result = CLASSIFIER.classify(pub)
+    assert result.is_relevant is True
+    assert SignalCategory.VETERANS in result.categories
+
+
+def test_svo_matches_spetsoperatsiya_synonym() -> None:
+    # PLAN.md Фаза 9 п.8 / docs/SPEC_svo_full_form_keywords.md: сигнал [39] из сверки —
+    # «участникам спецоперации» не матчился ни на «участник СВО», ни на что-либо ещё.
+    pub = _publication(
+        "sfr.gov.ru/press_center/news",
+        "Порядка 30 мер поддержки предоставляет Отделение СФР по Приморскому краю "
+        "участникам спецоперации",
+    )
+    result = CLASSIFIER.classify(pub)
+    assert result.is_relevant is True
+    assert SignalCategory.SVO in result.categories
+
+
 # --- По каждому уровню приоритета (раздел 7 AGENTS.md) ---
 
 

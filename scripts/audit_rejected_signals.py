@@ -141,6 +141,13 @@ def format_report(signals: list[Signal], caught: dict[int, str]) -> str:
             f"  [{signal.id}] {signal.title!r} — автоматика: {caught[signal.id]}; "
             f"эксперт: {expert_reason}{comment}"
         )
+
+    lines.append("")
+    lines.append("Подробности по НЕ пойманным автоматикой:")
+    for signal in not_caught:
+        expert_reason = signal.rejection_reason.value if signal.rejection_reason else "—"
+        comment = f" ({signal.rejection_comment})" if signal.rejection_comment else ""
+        lines.append(f"  [{signal.id}] {signal.title!r} — эксперт: {expert_reason}{comment}")
     return "\n".join(lines)
 
 
