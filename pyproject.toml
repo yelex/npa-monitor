@@ -16,6 +16,7 @@ dependencies = [
     "pillow>=10.0",
     "aiogram>=3.4,<4.0",
     "pydantic-settings>=2.0",
+    "pymorphy3>=2.0",
 ]
 
 [project.optional-dependencies]

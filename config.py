@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     autoupdate_spool_dir: str = "data/autoupdate_spool"
     autoupdate_mode: str = "spool"  # spool | http
 
+    # Снапшот базы мер (docs/SPEC_signal_type_measure_select.md) — тот же файл,
+    # что перезаливается одновременно с копией в npa-somas (инвариант, см. спеку).
+    benefits_knowledge_base_path: str = "data/benefits_knowledge_base.json"
+
     @property
     def allowed_user_ids(self) -> set[int]:
         if not self.allowed_telegram_user_ids.strip():

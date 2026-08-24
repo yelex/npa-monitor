@@ -20,7 +20,7 @@ import pytest
 
 import bot.main as bot_main
 from bot.autoupdate_client import AutoUpdateAgentClient
-from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus, SignalType
 from db.service import create_signal, transition_status
 
 
@@ -156,17 +156,60 @@ async def _search_region(sig_id: int, state: FakeState, query: str, *, user_id: 
     return message
 
 
+# --- docs/SPEC_signal_type_measure_select.md: тип сигнала -> выбор меры helper'ы ---
+
+
+async def _choose_signal_type(sig_id: int, state: FakeState, code: str, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"sigtype:{sig_id}:{code}"
+    cb.message.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_signal_type(cb, state)
+    return cb
+
+
+async def _search_measure(sig_id: int, state: FakeState, query: str, *, user_id: int = 111) -> MagicMock:
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = query
+    message.answer = AsyncMock()
+    await bot_main.on_measure_query(message, state)
+    return message
+
+
+async def _choose_measure(sig_id: int, state: FakeState, token: str, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"msel:{sig_id}:{token}"
+    cb.message.answer = AsyncMock()
+    cb.message.edit_reply_markup = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_measure_button(cb, state)
+    return cb
+
+
 async def _run_full_npa_flow(
-    sig_id: int, *, link_text: str = "skip", region_code: str = "rf", user_id: int = 111
+    sig_id: int,
+    *,
+    link_text: str = "skip",
+    region_code: str = "rf",
+    user_id: int = 111,
+    signal_type_code: str = "new",
 ) -> tuple[FakeState, MagicMock, MagicMock, MagicMock]:
     """Полный проход флоу: ссылка -> подтверждение ЖС (дефолтный предвыбор
-    классификатора, без ручного toggle) -> подтверждение региона кнопкой. Для тестов,
-    которым важен только конечный результат (SENT_TO_AGENT)."""
+    классификатора, без ручного toggle) -> подтверждение региона кнопкой -> тип сигнала.
+    По умолчанию `signal_type_code="new"` — кратчайший путь до SENT_TO_AGENT (без шага
+    выбора меры) для тестов, которым важен только конечный результат; четвёртый элемент
+    кортежа — callback-объект последнего шага флоу (его `.message.answer` содержит
+    финальное сообщение "Передан агенту")."""
     state = FakeState({"sig_id": sig_id})
     message = await _send_npa_link(sig_id, state, link_text, user_id=user_id)
     cb_confirm = await _confirm_categories(sig_id, state, user_id=user_id)
-    cb_region = await _confirm_region(sig_id, state, region_code, user_id=user_id)
-    return state, message, cb_confirm, cb_region
+    await _confirm_region(sig_id, state, region_code, user_id=user_id)
+    cb_final = await _choose_signal_type(sig_id, state, signal_type_code, user_id=user_id)
+    return state, message, cb_confirm, cb_final
 
 
 # --- Чистые функции ---
@@ -546,6 +589,7 @@ async def test_on_npa_link_skip_transitions_without_touching_link(monkeypatch) -
 
     await _confirm_categories(sig_id, state)
     await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "new")
 
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
@@ -600,6 +644,7 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # ждёт подтверждения ЖС/региона
     await _confirm_categories(sig_id, state)
     await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "new")
 
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
@@ -614,6 +659,9 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     assert call_discovery_url == "https://sfr.gov.ru/1"  # Signal.source_url из _make_signal
     assert call_categories == ["veterans"]
     assert call_region == "rf"
+    # docs/SPEC_signal_type_measure_select.md: контракт задачи v2 — тип сигнала +
+    # выбор меры (тут "new", measure_id/measure_row_hash остаются null).
+    assert sent.call_args.kwargs == {"signal_type": "new", "measure_id": None, "measure_row_hash": None}
 
 
 async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_call(
@@ -632,11 +680,12 @@ async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_c
 
     await _send_npa_link(sig_id, state, "https://docs.cntd.ru/document/408415942")
     await _confirm_categories(sig_id, state)
-    cb_region = await _confirm_region(sig_id, state, "rf")
+    await _confirm_region(sig_id, state, "rf")
+    cb_signal_type = await _choose_signal_type(sig_id, state, "new")
 
     fetch_mock.assert_not_called()
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
-    assert "автопроверку" in cb_region.message.answer.await_args.args[0]
+    assert "автопроверку" in cb_signal_type.message.answer.await_args.args[0]
     assert sent.call_args.args[1] == "https://docs.cntd.ru/document/408415942"
 
 
@@ -683,9 +732,10 @@ async def test_on_npa_link_shows_message_instead_of_crashing_when_already_sent_t
 
     await _send_npa_link(sig_id, state, "https://sfr.gov.ru/document/1")
     await _confirm_categories(sig_id, state)
-    cb_region = await _confirm_region(sig_id, state, "rf")
+    await _confirm_region(sig_id, state, "rf")
+    cb_signal_type = await _choose_signal_type(sig_id, state, "new")
 
-    assert "уже в статусе" in cb_region.message.answer.await_args.args[0]
+    assert "уже в статусе" in cb_signal_type.message.answer.await_args.args[0]
     state.clear.assert_awaited_once()
 
 
@@ -773,7 +823,8 @@ async def test_on_region_manual_single_match_finishes_flow(monkeypatch) -> None:
     await _confirm_categories(sig_id, state)
     await _confirm_region(sig_id, state, "other")
 
-    message = await _search_region(sig_id, state, "Москва")
+    await _search_region(sig_id, state, "Москва")
+    await _choose_signal_type(sig_id, state, "new")
 
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
@@ -829,6 +880,195 @@ async def test_finish_npa_flow_no_audit_reason_without_divergence() -> None:
         assert last.reason is None
 
 
+# --- docs/SPEC_signal_type_measure_select.md: тип сигнала -> выбор меры ---------
+#
+# Категория SVO + регион RF используются намеренно (не фикстура) — реальный пул
+# `data/benefits_knowledge_base.json` (СВО-датасет `military`) содержит записи с
+# непустым `measure_id` (в отличие от `vbd`, где measure_id пустой у всех записей —
+# см. AGENTS.md/спеку про 799 исключённых строк), достаточно кандидатов для проверки
+# пагинации "Ещё 8" (31 запись в пуле SVO/RF на момент написания теста).
+
+
+def _spool_task_payload(sig_id: int) -> dict:
+    path = _spool_dir() / "tasks" / f"sig-{sig_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def test_signal_type_kb_has_change_and_new_buttons() -> None:
+    kb = bot_main.signal_type_kb(5)
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == ["sigtype:5:change", "sigtype:5:new"]
+
+
+async def test_choosing_new_skips_measure_step_and_reaches_sent_to_agent() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+
+    cb = await _choose_signal_type(sig_id, state, "new")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    assert "Передан агенту" in cb.message.answer.await_args.args[0]
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        assert signal.signal_type == SignalType.NEW
+        assert signal.measure_id is None
+        assert signal.measure_row_hash is None
+    payload = _spool_task_payload(sig_id)
+    assert payload["schema_version"] == 2
+    assert payload["signal_type"] == "new"
+    assert payload["measure_id"] is None
+    assert payload["measure_row_hash"] is None
+
+
+async def test_choosing_change_shows_measure_prompt_with_only_not_in_base_button() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+
+    cb = await _choose_signal_type(sig_id, state, "change")
+
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # ждёт выбора меры
+    kb = cb.message.edit_text.await_args.kwargs["reply_markup"]
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == [f"msel:{sig_id}:none"]
+
+
+async def test_measure_query_shows_ranked_candidates() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+
+    message = await _search_measure(sig_id, state, "выплата при заключении контракта")
+
+    kb = message.answer.await_args.kwargs["reply_markup"]
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    # топ-8 кандидатов + "Ещё 8"/"Вписать вручную"/"Нет в базе"
+    assert len(buttons) == 8 + 3
+    assert buttons[-1].callback_data == f"msel:{sig_id}:none"
+    assert buttons[-2].callback_data == f"msel:{sig_id}:manual"
+    assert buttons[-3].callback_data == f"msel:{sig_id}:p8"
+    data = await state.get_data()
+    assert data["measure_query"] == "выплата при заключении контракта"
+    assert len(data["measure_candidates"]) > 8
+    assert data["measure_offset"] == 0
+
+
+async def test_measure_button_selects_candidate_and_finishes_flow() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+    await _search_measure(sig_id, state, "выплата при заключении контракта")
+    data = await state.get_data()
+    top_candidate = data["measure_candidates"][0]
+
+    cb = await _choose_measure(sig_id, state, "0")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    assert "Передан агенту" in cb.message.answer.await_args.args[0]
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        assert signal.signal_type == SignalType.CHANGE
+        assert signal.measure_id == top_candidate["measure_id"]
+        assert signal.measure_row_hash == top_candidate["row_hash"]
+    payload = _spool_task_payload(sig_id)
+    assert payload["signal_type"] == "change"
+    assert payload["measure_id"] == top_candidate["measure_id"]
+    assert payload["measure_row_hash"] == top_candidate["row_hash"]
+
+
+async def test_measure_button_next_page_shows_more_candidates() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+    await _search_measure(sig_id, state, "выплата")
+
+    cb = await _choose_measure(sig_id, state, "p8")
+
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # пагинация не завершает флоу
+    kb = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert buttons[0].callback_data == f"msel:{sig_id}:8"  # первый кандидат второй страницы
+    data = await state.get_data()
+    assert data["measure_offset"] == 8
+
+
+async def test_measure_button_manual_reentry_prompts_new_search_without_finishing() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+    await _search_measure(sig_id, state, "выплата")
+
+    cb = await _choose_measure(sig_id, state, "manual")
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
+    assert "Введите текст" in cb.message.answer.await_args.args[0]
+
+    # тот же скор, новый топ-8 (SPEC п.2: "Вписать вручную" -> текст -> тот же скор)
+    message = await _search_measure(sig_id, state, "компенсация инвалиду")
+    data = await state.get_data()
+    assert data["measure_query"] == "компенсация инвалиду"
+    assert message.answer.await_count == 1
+
+
+async def test_measure_button_none_finishes_flow_with_null_measure_id() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+    await _search_measure(sig_id, state, "выплата при заключении контракта")
+
+    await _choose_measure(sig_id, state, "none")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        assert signal.signal_type == SignalType.CHANGE
+        assert signal.measure_id is None
+        assert signal.measure_row_hash is None
+    payload = _spool_task_payload(sig_id)
+    assert payload["measure_id"] is None
+
+
+async def test_measure_query_empty_pool_still_offers_not_in_base(monkeypatch) -> None:
+    """Категория ВБД в реальной базе — все записи с пустым measure_id (799 исключённых,
+    см. спеку) -> пул после фильтра пуст для любого запроса. Флоу не должен падать —
+    аналитик всё равно может завершить через «Нет в базе»."""
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+
+    message = await _search_measure(sig_id, state, "любая выплата ветерану")
+
+    assert "Ничего не найдено" in message.answer.await_args.args[0]
+    kb = message.answer.await_args.kwargs["reply_markup"]
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert [b.callback_data for b in buttons] == [f"msel:{sig_id}:none"]
+
+
 # --- docs/SPEC_autoupdate_agent_contract.md: контракт задачи, атомарность, ------
 # идемпотентность, дозапись при старте, карточки по результатам --------------------
 
@@ -838,8 +1078,9 @@ def _spool_dir() -> Path:
 
 
 def test_autoupdate_client_send_writes_task_contract_with_real_enum_codes() -> None:
-    """SPEC раздел 3.3: schema_version=1, signal_id отдельным полем (не парсим
-    `task_id`), categories/region — реальные `.value` из `db/enums.py`."""
+    """SPEC_signal_type_measure_select.md: schema_version=2, signal_id отдельным полем
+    (не парсим `task_id`), categories/region/signal_type/measure_id/measure_row_hash —
+    реальные значения контракта v2."""
     sig_id = _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO], region=Region.MOSCOW)
     factory = bot_main.get_session_factory()
     with factory() as session:
@@ -851,21 +1092,43 @@ def test_autoupdate_client_send_writes_task_contract_with_real_enum_codes() -> N
             signal.source_url,
             ["veterans", "svo"],
             "moscow",
+            signal_type="change",
+            measure_id="00_svo_1",
+            measure_row_hash="abc123",
         )
 
     assert path == _spool_dir() / "tasks" / f"sig-{sig_id}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     created_at = payload.pop("created_at")
     assert payload == {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_id": f"sig-{sig_id}",
         "signal_id": sig_id,
         "npa_url": "https://publication.pravo.gov.ru/document/1",
         "discovery_url": "https://sfr.gov.ru/1",
         "categories": ["veterans", "svo"],
         "region": "moscow",
+        "signal_type": "change",
+        "measure_id": "00_svo_1",
+        "measure_row_hash": "abc123",
     }
     dt.datetime.fromisoformat(created_at)  # не падает — валидный ISO 8601
+
+
+def test_autoupdate_client_send_includes_comment_when_provided() -> None:
+    """SPEC: `comment` — необязательная пометка деградации (используется сверкой
+    v1->v2), в контракте только когда явно передана."""
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        path = AutoUpdateAgentClient().send(
+            signal, None, signal.source_url, ["veterans"], "rf",
+            signal_type="change", measure_id=None, measure_row_hash=None, comment="деградация",
+        )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["comment"] == "деградация"
 
 
 def test_autoupdate_client_send_allows_null_npa_url_with_discovery_url() -> None:
@@ -874,11 +1137,15 @@ def test_autoupdate_client_send_allows_null_npa_url_with_discovery_url() -> None
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
-        path = AutoUpdateAgentClient().send(signal, None, signal.source_url, ["veterans"], "rf")
+        path = AutoUpdateAgentClient().send(
+            signal, None, signal.source_url, ["veterans"], "rf",
+            signal_type="new", measure_id=None, measure_row_hash=None,
+        )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["npa_url"] is None
     assert payload["discovery_url"] == "https://sfr.gov.ru/1"
+    assert "comment" not in payload
 
 
 def test_autoupdate_client_send_writes_atomically_no_leftover_tmp_file() -> None:
@@ -888,7 +1155,10 @@ def test_autoupdate_client_send_writes_atomically_no_leftover_tmp_file() -> None
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
-        AutoUpdateAgentClient().send(signal, "https://sfr.gov.ru/document/1", signal.source_url, [], "rf")
+        AutoUpdateAgentClient().send(
+            signal, "https://sfr.gov.ru/document/1", signal.source_url, [], "rf",
+            signal_type="new", measure_id=None, measure_row_hash=None,
+        )
 
     files = sorted(p.name for p in (_spool_dir() / "tasks").iterdir())
     assert files == [f"sig-{sig_id}.json"]
@@ -902,14 +1172,22 @@ def test_autoupdate_client_send_is_idempotent_overwrites_same_task_file() -> Non
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
         client = AutoUpdateAgentClient()
-        client.send(signal, "https://sfr.gov.ru/first", signal.source_url, ["veterans"], "rf")
-        path = client.send(signal, "https://sfr.gov.ru/second", signal.source_url, ["svo"], "moscow")
+        client.send(
+            signal, "https://sfr.gov.ru/first", signal.source_url, ["veterans"], "rf",
+            signal_type="change", measure_id="00_svo_1", measure_row_hash="h1",
+        )
+        path = client.send(
+            signal, "https://sfr.gov.ru/second", signal.source_url, ["svo"], "moscow",
+            signal_type="new", measure_id=None, measure_row_hash=None,
+        )
 
     files = list((_spool_dir() / "tasks").iterdir())
     assert len(files) == 1
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["npa_url"] == "https://sfr.gov.ru/second"
     assert payload["region"] == "moscow"
+    assert payload["signal_type"] == "new"
+    assert payload["measure_id"] is None
 
 
 async def test_finish_npa_flow_does_not_commit_when_task_write_fails(monkeypatch) -> None:
@@ -951,6 +1229,7 @@ async def test_reconcile_spool_tasks_writes_missing_task_for_sent_to_agent_signa
 
 
 async def test_reconcile_spool_tasks_skips_signal_with_existing_task_file() -> None:
+    """Файл уже в схеме v2 (записан обычным путём `_finish_npa_flow`) — сверка не трогает."""
     sig_id = _make_signal()
     factory = bot_main.get_session_factory()
     with factory() as session:
@@ -958,12 +1237,84 @@ async def test_reconcile_spool_tasks_skips_signal_with_existing_task_file() -> N
         transition_status(session, signal, SignalStatus.IN_PROGRESS)
         transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
         session.commit()
-        bot_main._autoupdate_client.send(signal, None, signal.source_url, [], "rf")
+        bot_main._autoupdate_client.send(
+            signal, None, signal.source_url, [], "rf",
+            signal_type="new", measure_id=None, measure_row_hash=None,
+        )
 
     with factory() as session:
         written = bot_main._reconcile_spool_tasks(session, bot_main._autoupdate_client)
 
     assert written == 0
+
+
+async def test_reconcile_spool_tasks_rewrites_v1_task_to_v2() -> None:
+    """docs/SPEC_signal_type_measure_select.md: файл существует, но со старой схемой
+    (schema_version=1, задачи, записанные до этой доработки) -> перезапись v1->v2.
+    Сигнал без подтверждённого `signal_type` (создан до внедрения шага выбора типа) —
+    осознанная деградация: change/measure_id=null, пометка в comment."""
+    sig_id = _make_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.IN_PROGRESS)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+
+    task_file = _spool_dir() / "tasks" / f"sig-{sig_id}.json"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
+    task_file.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "task_id": f"sig-{sig_id}",
+            "signal_id": sig_id,
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "npa_url": None,
+            "discovery_url": "https://sfr.gov.ru/1",
+            "categories": ["svo"],
+            "region": "rf",
+        }),
+        encoding="utf-8",
+    )
+
+    with factory() as session:
+        written = bot_main._reconcile_spool_tasks(session, bot_main._autoupdate_client)
+
+    assert written == 1
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["signal_type"] == "change"
+    assert payload["measure_id"] is None
+    assert "тип сигнала не был подтверждён" in payload["comment"]
+
+
+async def test_reconcile_spool_tasks_preserves_confirmed_signal_type_on_v1_rewrite() -> None:
+    """Если `signal.signal_type` уже подтверждён (записан через полный флоу, но файл
+    почему-то остался v1) — сверка использует реальный тип/меру, без пометки деградации."""
+    sig_id = _make_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.IN_PROGRESS)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        signal.signal_type = SignalType.CHANGE
+        signal.measure_id = "00_svo_1"
+        signal.measure_row_hash = "h1"
+        session.commit()
+
+    task_file = _spool_dir() / "tasks" / f"sig-{sig_id}.json"
+    task_file.parent.mkdir(parents=True, exist_ok=True)
+    task_file.write_text(json.dumps({"schema_version": 1, "signal_id": sig_id}), encoding="utf-8")
+
+    with factory() as session:
+        written = bot_main._reconcile_spool_tasks(session, bot_main._autoupdate_client)
+
+    assert written == 1
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 2
+    assert payload["signal_type"] == "change"
+    assert payload["measure_id"] == "00_svo_1"
+    assert "comment" not in payload
 
 
 def _write_result(spool_dir: Path, name: str, payload: dict) -> Path:

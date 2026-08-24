@@ -25,7 +25,7 @@ from db.models import Signal
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class AutoUpdateModeNotSupported(NotImplementedError):
@@ -85,7 +85,17 @@ class AutoUpdateAgentClient:
         discovery_url: str,
         categories: list[str],
         region: str,
+        *,
+        signal_type: str,
+        measure_id: str | None,
+        measure_row_hash: str | None,
+        comment: str | None = None,
     ) -> Path:
+        """docs/SPEC_signal_type_measure_select.md, раздел «Задача v2 и старые данные»:
+        `signal_type`/`measure_id`/`measure_row_hash` — обязательные поля контракта v2
+        коннектора npa-somas (спека v3). `comment` — необязательная пометка деградации
+        (используется сверкой при перезаписи v1-задач без подтверждённого типа, см.
+        `bot/main.py::_reconcile_spool_tasks`)."""
         settings = get_settings()
         if settings.autoupdate_mode != "spool":
             raise AutoUpdateModeNotSupported(
@@ -101,7 +111,12 @@ class AutoUpdateAgentClient:
             "discovery_url": discovery_url,
             "categories": categories,
             "region": region,
+            "signal_type": signal_type,
+            "measure_id": measure_id,
+            "measure_row_hash": measure_row_hash,
         }
+        if comment is not None:
+            payload["comment"] = comment
         path = task_path(spool_dir, signal.id)
         _write_json_atomic(path, payload)
         log.info("автообновление: задача записана signal=%s -> %s", signal.id, path)

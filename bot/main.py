@@ -29,7 +29,9 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from bot.autoupdate_client import AutoUpdateAgentClient, archive_result, list_pending_results, task_path
 from config import get_settings
 from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
-from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus, SignalType
+from db.measures import MeasureRecord, build_pool
+from db.measures import rank as rank_measures
 from db.models import Signal, SignalCategoryLink, StatusHistory
 from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
@@ -90,6 +92,11 @@ class NpaFlow(StatesGroup):
     # после ссылки на НПА и перед SENT_TO_AGENT — два дополнительных шага одного флоу.
     ask_categories = State()
     ask_region = State()
+    # docs/SPEC_signal_type_measure_select.md: тип сигнала (change/new) + выбор меры
+    # из базы (только для change) — два новых шага после региона, _finish_npa_flow
+    # теперь вызывается из конца этой цепочки, не из региона.
+    ask_signal_type = State()
+    ask_measure = State()
 
 
 # --- Auth --------------------------------------------------------------------
@@ -196,6 +203,55 @@ def region_kb(sig_id: int) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="Другое", callback_data=f"reg:{sig_id}:other")],
     ])
+
+
+# --- SPEC_signal_type_measure_select.md: тип сигнала + выбор меры из базы --------
+
+SIGNAL_TYPE_LABELS = {"change": "Изменение существующей меры", "new": "Новая мера"}
+MEASURE_PAGE_SIZE = 8
+MEASURE_CANDIDATE_LIMIT = 200  # верхняя граница размера кандидатов в FSM state
+
+
+def signal_type_kb(sig_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=SIGNAL_TYPE_LABELS["change"], callback_data=f"sigtype:{sig_id}:change")],
+        [InlineKeyboardButton(text=SIGNAL_TYPE_LABELS["new"], callback_data=f"sigtype:{sig_id}:new")],
+    ])
+
+
+def measure_label(record: MeasureRecord) -> str:
+    name = record.human_readable_name or record.measure_name or record.measure_id
+    label = f"{name} [{record.measure_id}]"
+    return label if len(label) <= 64 else label[:61] + "..."
+
+
+def measure_initial_kb(sig_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура до первого поиска (сразу после выбора «Изменение») — только
+    «Нет в базе», саджеста ещё нет (текст запроса аналитик ещё не ввёл)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Нет в базе", callback_data=f"msel:{sig_id}:none")],
+    ])
+
+
+def measure_kb(sig_id: int, candidates: list[dict], offset: int) -> InlineKeyboardMarkup:
+    """SPEC п.2: топ-8 (текущая страница по `offset`) + «Ещё 8»/«Вписать вручную»/
+    «Нет в базе». `callback_data` — только `msel:{sig_id}:{page|idx}` (лимит 64 байта):
+    `idx` — глобальный индекс кандидата в списке (число), `p<offset>` — переход на
+    страницу с этого индекса, `manual`/`none` — служебные короткие токены."""
+    page_items = candidates[offset:offset + MEASURE_PAGE_SIZE]
+    rows = [
+        [InlineKeyboardButton(text=item["label"], callback_data=f"msel:{sig_id}:{offset + i}")]
+        for i, item in enumerate(page_items)
+    ]
+    nav_row = []
+    if offset + MEASURE_PAGE_SIZE < len(candidates):
+        nav_row.append(
+            InlineKeyboardButton(text="Ещё 8", callback_data=f"msel:{sig_id}:p{offset + MEASURE_PAGE_SIZE}")
+        )
+    nav_row.append(InlineKeyboardButton(text="Вписать вручную", callback_data=f"msel:{sig_id}:manual"))
+    nav_row.append(InlineKeyboardButton(text="Нет в базе", callback_data=f"msel:{sig_id}:none"))
+    rows.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # Порядок и коды сортировки/фильтра по приоритету в кнопках под списком сигналов
@@ -723,18 +779,23 @@ def _audit_reason(
 async def _finish_npa_flow(
     target: Message, state: FSMContext, sig_id: int, region: Region, *, changed_by: int
 ) -> None:
-    """Финальный шаг флоу (SPEC решение 1): одна DB-сессия — npa_link, перезапись
-    `signal_categories`/`Signal.region` подтверждёнными значениями, `transition_status`
-    в SENT_TO_AGENT (с аудитом расхождения), `_autoupdate_client.send` (запись задачи в
-    spool ДО commit — docs/SPEC_autoupdate_agent_contract.md раздел 3.2: если запись
-    упала, переход не коммитится, аналитик видит ошибку и может повторить — `send()`
-    идемпотентен, перезапись безопасна), commit, ответ аналитику, `state.clear()`.
+    """Финальный шаг флоу (SPEC_signal_type_measure_select.md: вызывается теперь из
+    конца шага выбора меры, не из региона): одна DB-сессия — npa_link, перезапись
+    `signal_categories`/`Signal.region` подтверждёнными значениями, `signal_type`/
+    `measure_id`/`measure_row_hash` (SPEC п.3), `transition_status` в SENT_TO_AGENT (с
+    аудитом расхождения), `_autoupdate_client.send` (запись задачи v2 в spool ДО commit
+    — docs/SPEC_autoupdate_agent_contract.md раздел 3.2: если запись упала, переход не
+    коммитится, аналитик видит ошибку и может повторить — `send()` идемпотентен,
+    перезапись безопасна), commit, ответ аналитику, `state.clear()`.
     `target` — объект с `.answer()` (Message или `CallbackQuery.message`), гонки
     статусов — как в остальном коде (try/except)."""
     data = await state.get_data()
     categories: list[str] = data.get("categories", [])
     npa_link: str | None = data.get("npa_link")
     autocheck_skipped: bool = data.get("autocheck_skipped", False)
+    signal_type = SignalType(data.get("signal_type", SignalType.CHANGE.value))
+    measure_id: str | None = data.get("measure_id")
+    measure_row_hash: str | None = data.get("measure_row_hash")
 
     with get_session_factory()() as db:
         s = db.get(Signal, sig_id)
@@ -749,6 +810,9 @@ async def _finish_npa_flow(
         old_region = s.region
         s.categories = [SignalCategoryLink(category=SignalCategory(c)) for c in categories]
         s.region = region
+        s.signal_type = signal_type
+        s.measure_id = measure_id
+        s.measure_row_hash = measure_row_hash
         reason = _audit_reason(old_categories, old_region, categories, region)
 
         try:
@@ -762,7 +826,10 @@ async def _finish_npa_flow(
             return
 
         try:
-            _autoupdate_client.send(s, s.npa_link, s.source_url, categories, region.value)
+            _autoupdate_client.send(
+                s, s.npa_link, s.source_url, categories, region.value,
+                signal_type=signal_type.value, measure_id=measure_id, measure_row_hash=measure_row_hash,
+            )
         except Exception:  # noqa: BLE001
             db.rollback()
             log.exception(
@@ -789,10 +856,19 @@ async def _finish_npa_flow(
     await state.clear()
 
 
+async def _advance_to_signal_type(target: Message, state: FSMContext, sig_id: int, region: Region) -> None:
+    """SPEC_signal_type_measure_select.md: после подтверждения региона — шаг «тип
+    сигнала», не финал флоу. Регион сохраняется в FSM state (нужен в конце цепочки,
+    в `_finish_npa_flow`, которая теперь вызывается из `on_signal_type`/`on_measure_button`)."""
+    await state.update_data(region=region.value)
+    await state.set_state(NpaFlow.ask_signal_type)
+    await target.answer("Регион подтверждён. Тип сигнала:", reply_markup=signal_type_kb(sig_id))
+
+
 @router.callback_query(F.data.startswith("reg:"))
 async def on_region_button(cb: CallbackQuery, state: FSMContext) -> None:
-    """SPEC п.3: РФ/Москва/Не определён — сразу финальный шаг; «Другое» — просит текст,
-    обрабатывает `on_region_manual` в том же состоянии `ask_region`."""
+    """SPEC п.3: РФ/Москва/Не определён — переход к шагу типа сигнала; «Другое» —
+    просит текст, обрабатывает `on_region_manual` в том же состоянии `ask_region`."""
     if not is_allowed(cb.from_user.id):
         await cb.answer("Нет доступа", show_alert=True)
         return
@@ -802,7 +878,7 @@ async def on_region_button(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.answer("Введите название региона (или часть) текстом.")  # type: ignore[union-attr]
         await cb.answer()
         return
-    await _finish_npa_flow(cb.message, state, sig_id, Region(code), changed_by=cb.from_user.id)  # type: ignore[arg-type]
+    await _advance_to_signal_type(cb.message, state, sig_id, Region(code))  # type: ignore[arg-type]
     await cb.answer()
 
 
@@ -828,7 +904,120 @@ async def on_region_manual(message: Message, state: FSMContext) -> None:
         await message.answer(f"Найдено несколько регионов, уточните запрос:\n{listing}")
         return
 
-    await _finish_npa_flow(message, state, sig_id, matches[0].region, changed_by=message.from_user.id)
+    await _advance_to_signal_type(message, state, sig_id, matches[0].region)
+
+
+# --- FSM: тип сигнала -> выбор меры (SPEC_signal_type_measure_select.md) ---------
+
+
+@router.callback_query(F.data.startswith("sigtype:"))
+async def on_signal_type(cb: CallbackQuery, state: FSMContext) -> None:
+    """«Новая мера» — сразу финал флоу (measure_id остаётся null); «Изменение» —
+    переход к шагу саджеста меры (`ask_measure`), финал только после выбора."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, code = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    data = await state.get_data()
+    region = Region(data["region"])
+
+    if code == "new":
+        await state.update_data(signal_type=SignalType.NEW.value, measure_id=None, measure_row_hash=None)
+        await _finish_npa_flow(cb.message, state, sig_id, region, changed_by=cb.from_user.id)  # type: ignore[arg-type]
+        await cb.answer()
+        return
+
+    await state.update_data(signal_type=SignalType.CHANGE.value)
+    await state.set_state(NpaFlow.ask_measure)
+    await cb.message.edit_text(  # type: ignore[union-attr]
+        "Тип: изменение существующей меры. Введите название/суть меры для поиска в "
+        "базе (или «Нет в базе», если её ещё нет).",
+        reply_markup=measure_initial_kb(sig_id),
+    )
+    await cb.answer()
+
+
+@router.message(NpaFlow.ask_measure)
+async def on_measure_query(message: Message, state: FSMContext) -> None:
+    """Свободный текст в состоянии `ask_measure` — поиск по базе (SPEC п.2): пул по
+    ЖС+региону из подтверждённых на предыдущих шагах данных, гибридный скор, топ-8.
+    Тот же обработчик используется и после «Вписать вручную» (состояние не меняется)."""
+    if not is_allowed(message.from_user.id):
+        return
+    data = await state.get_data()
+    sig_id = data["sig_id"]
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer(
+            "Введите текст запроса, или нажмите «Нет в базе».", reply_markup=measure_initial_kb(sig_id)
+        )
+        return
+
+    categories = [SignalCategory(c) for c in data.get("categories", [])]
+    region = Region(data["region"])
+    pool = build_pool(categories, region, path=get_settings().benefits_knowledge_base_path)
+    ranked = rank_measures(query, pool)
+    candidates = [
+        {"measure_id": r.measure_id, "label": measure_label(r), "row_hash": r.row_hash}
+        for r, _score in ranked[:MEASURE_CANDIDATE_LIMIT]
+    ]
+    await state.update_data(measure_query=query, measure_candidates=candidates, measure_offset=0)
+
+    if not candidates:
+        await message.answer(
+            "Ничего не найдено. Уточните запрос или нажмите «Нет в базе».",
+            reply_markup=measure_initial_kb(sig_id),
+        )
+        return
+    await message.answer(
+        f"Найдено {len(candidates)}. Выберите меру:", reply_markup=measure_kb(sig_id, candidates, 0)
+    )
+
+
+@router.callback_query(F.data.startswith("msel:"))
+async def on_measure_button(cb: CallbackQuery, state: FSMContext) -> None:
+    """SPEC п.2: `msel:{sig_id}:{idx}` — выбор кандидата, `p<offset>` — «Ещё 8»,
+    `manual` — просит новый текст (обрабатывает `on_measure_query`, состояние не
+    меняется), `none` — «Нет в базе» (measure_id=null, честно), сразу финал флоу."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, token = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    data = await state.get_data()
+    region = Region(data["region"])
+
+    if token == "manual":
+        await cb.message.answer("Введите текст для поиска меры.")  # type: ignore[union-attr]
+        await cb.answer()
+        return
+
+    if token == "none":
+        await state.update_data(measure_id=None, measure_row_hash=None)
+        await _finish_npa_flow(cb.message, state, sig_id, region, changed_by=cb.from_user.id)  # type: ignore[arg-type]
+        await cb.answer()
+        return
+
+    candidates: list[dict] = data.get("measure_candidates", [])
+
+    if token.startswith("p"):
+        new_offset = int(token[1:])
+        await state.update_data(measure_offset=new_offset)
+        await cb.message.edit_reply_markup(  # type: ignore[union-attr]
+            reply_markup=measure_kb(sig_id, candidates, new_offset)
+        )
+        await cb.answer()
+        return
+
+    idx = int(token)
+    if idx < 0 or idx >= len(candidates):
+        await cb.answer("Список устарел, повторите поиск текстом", show_alert=True)
+        return
+    chosen = candidates[idx]
+    await state.update_data(measure_id=chosen["measure_id"], measure_row_hash=chosen["row_hash"])
+    await _finish_npa_flow(cb.message, state, sig_id, region, changed_by=cb.from_user.id)  # type: ignore[arg-type]
+    await cb.answer()
 
 
 # --- reminder ------------------------------------------------------------------
@@ -903,10 +1092,15 @@ async def _digest_loop(bot: Bot) -> None:
 
 
 def _reconcile_spool_tasks(db: Session, client: AutoUpdateAgentClient) -> int:
-    """docs/SPEC_autoupdate_agent_contract.md раздел 3.2: сигналы в SENT_TO_AGENT без
+    """docs/SPEC_autoupdate_agent_contract.md раздел 3.2 + docs/SPEC_signal_type_
+    measure_select.md раздел «Задача v2 и старые данные»: сигналы в SENT_TO_AGENT без
     файла задачи в spool (обычный путь `_finish_npa_flow` пишет задачу до commit — сюда
-    можно попасть только если файл потерян/удалён вручную между запусками) -> дозапись,
-    `AutoUpdateAgentClient.send` идемпотентен. Вызывается при старте бота (`main()`)."""
+    можно попасть только если файл потерян/удалён вручную между запусками) -> дозапись;
+    а также файлы со старой схемой (`schema_version` != 2, задачи, записанные до этой
+    доработки) -> перезапись v1->v2. `AutoUpdateAgentClient.send` идемпотентен.
+    Сигналы без подтверждённого `signal_type` (переданы агенту до внедрения шагов
+    выбора типа/меры) — осознанная деградация: `signal_type=change`, `measure_id=null`,
+    пометка в `comment`, тип не восстановим (спека). Вызывается при старте бота (`main()`)."""
     spool_dir = Path(get_settings().autoupdate_spool_dir)
     signals = (
         db.query(Signal)
@@ -916,13 +1110,36 @@ def _reconcile_spool_tasks(db: Session, client: AutoUpdateAgentClient) -> int:
     )
     written = 0
     for s in signals:
-        if task_path(spool_dir, s.id).exists():
+        path = task_path(spool_dir, s.id)
+        payload = None
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                log.exception("автообновление: не удалось прочитать задачу %s при сверке", path)
+                continue
+        if payload is not None and payload.get("schema_version") == 2:
             continue
+
         cats = [c.category.value for c in s.categories]
-        client.send(s, s.npa_link, s.source_url, cats, s.region.value)
+        if s.signal_type is not None:
+            signal_type = s.signal_type.value
+            comment = None
+        else:
+            signal_type = SignalType.CHANGE.value
+            comment = (
+                "тип сигнала не был подтверждён аналитиком (сигнал передан агенту до "
+                "внедрения выбора типа/меры) — деградация при сверке: change, "
+                "measure_id не восстановлен"
+            )
+        client.send(
+            s, s.npa_link, s.source_url, cats, s.region.value,
+            signal_type=signal_type, measure_id=s.measure_id, measure_row_hash=s.measure_row_hash,
+            comment=comment,
+        )
         written += 1
     if written:
-        log.info("автообновление: дозаписано %d задач(и) в spool при сверке", written)
+        log.info("автообновление: дозаписано/перезаписано %d задач(и) в spool при сверке", written)
     return written
 
 

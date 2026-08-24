@@ -24,6 +24,7 @@ from db.enums import (
     RejectionReason,
     SignalCategory,
     SignalStatus,
+    SignalType,
 )
 from db.types import UTCDateTime
 
@@ -65,6 +66,15 @@ class Signal(Base):
     # Привязка к карточке меры внешнего контура «агента автообновления» (раздел 3).
     # Не FK: measureId живёт в другой системе, здесь только строковый идентификатор.
     measure_id: Mapped[str | None] = mapped_column(String(64), default=None, index=True)
+
+    # docs/SPEC_signal_type_measure_select.md: тип сигнала (change/new, шаг FSM после
+    # региона) и row_hash записи базы мер на момент выбора (для сравнения версий
+    # коннектором) — null для new / «нет в базе». Колонки добавлены поверх уже
+    # развёрнутой схемы через db/session.py::_ensure_columns (Alembic не используется).
+    signal_type: Mapped[SignalType | None] = mapped_column(
+        Enum(SignalType, native_enum=False, length=16), default=None
+    )
+    measure_row_hash: Mapped[str | None] = mapped_column(String(64), default=None)
 
     rejection_reason: Mapped[RejectionReason | None] = mapped_column(
         Enum(RejectionReason, native_enum=False, length=32), default=None

@@ -123,9 +123,24 @@ async def test_happy_path_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     await bot_main.on_region_button(cb_region, npa_state)
 
     with factory() as session:
+        assert session.get(Signal, sig_id).status == SignalStatus.IN_PROGRESS  # ждёт типа сигнала
+
+    # docs/SPEC_signal_type_measure_select.md: после региона — тип сигнала («новая
+    # мера» — кратчайший путь до SENT_TO_AGENT, без шага выбора меры из базы).
+    cb_signal_type = MagicMock()
+    cb_signal_type.from_user.id = 111
+    cb_signal_type.data = f"sigtype:{sig_id}:new"
+    cb_signal_type.message.edit_text = AsyncMock()
+    cb_signal_type.message.answer = AsyncMock()
+    cb_signal_type.answer = AsyncMock()
+    await bot_main.on_signal_type(cb_signal_type, npa_state)
+
+    with factory() as session:
         signal = session.get(Signal, sig_id)
         assert signal.status == SignalStatus.SENT_TO_AGENT
         assert signal.npa_link == "https://sfr.gov.ru/document/happy-path-npa"
+        assert signal.signal_type.value == "new"
+        assert signal.measure_id is None
 
     # --- 5. Эксперт проверил результат агента → /complete → «Завершён» ---
     complete_message = MagicMock()

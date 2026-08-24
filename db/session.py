@@ -18,6 +18,9 @@ DEFAULT_DB_PATH = Path("npa_monitor.db")
 # полноценных миграций — только для этого случая, см. docs/SPEC_content_dedup.md, раздел 3.1.
 _COLUMNS_ADDED_AFTER_INITIAL_SCHEMA = (
     ("documents_seen", "title", "TEXT"),
+    # docs/SPEC_signal_type_measure_select.md: тип сигнала + row_hash выбранной меры.
+    ("signals", "signal_type", "VARCHAR(16)"),
+    ("signals", "measure_row_hash", "VARCHAR(64)"),
 )
 
 

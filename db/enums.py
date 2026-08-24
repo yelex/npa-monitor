@@ -56,3 +56,12 @@ class Region(str, enum.Enum):
     RF = "rf"  # РФ (федеральный уровень)
     MOSCOW = "moscow"  # Москва (77) — MVP
     UNDEFINED = "undefined"  # Не определён
+
+
+class SignalType(str, enum.Enum):
+    """Тип сигнала, docs/SPEC_signal_type_measure_select.md: контракт задачи v2 для
+    коннектора npa-somas — изменение существующей меры (с выбором measure_id из базы)
+    или новая мера (measure_id остаётся null)."""
+
+    CHANGE = "change"  # изменение существующей меры
+    NEW = "new"  # новая мера

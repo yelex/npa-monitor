@@ -277,6 +277,46 @@ def test_init_db_adds_title_column_to_pre_existing_documents_seen_table(tmp_path
         assert row.title is None  # старые строки — без заголовка, не участвуют в дедупе по содержанию
 
 
+def test_init_db_adds_signal_type_and_measure_row_hash_columns_to_pre_existing_signals_table(tmp_path):
+    # docs/SPEC_signal_type_measure_select.md: сигналы, переданные агенту до этой
+    # доработки, живут в таблице signals без новых колонок — init_db должен добавить
+    # их (_ensure_columns) и не потерять уже накопленные строки.
+    from sqlalchemy import text as sql_text
+
+    engine = make_engine(tmp_path / "legacy_signals.db")
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "CREATE TABLE signals ("
+                "id INTEGER PRIMARY KEY, event_type VARCHAR(32), priority VARCHAR(16), "
+                "status VARCHAR(32), title TEXT, requisites TEXT, region VARCHAR(16), "
+                "source_url TEXT, npa_link TEXT, measure_id VARCHAR(64), "
+                "rejection_reason VARCHAR(32), rejection_comment TEXT, "
+                "created_at DATETIME, updated_at DATETIME)"
+            )
+        )
+        conn.execute(
+            sql_text(
+                "INSERT INTO signals (event_type, priority, status, region, source_url, "
+                "created_at, updated_at) VALUES ('new_document', 'high', 'sent_to_agent', "
+                "'rf', 'https://example.gov.ru/legacy', '2026-01-01 00:00:00', "
+                "'2026-01-01 00:00:00')"
+            )
+        )
+
+    init_db(engine)
+
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(signals)")}
+        assert {"signal_type", "measure_row_hash"} <= columns
+        row = conn.execute(
+            sql_text("SELECT source_url, signal_type, measure_row_hash FROM signals")
+        ).one()
+        assert row.source_url == "https://example.gov.ru/legacy"
+        assert row.signal_type is None  # старая строка — тип не восстановлен миграцией
+        assert row.measure_row_hash is None
+
+
 def test_source_state_upsert(session: Session):
     now = dt.datetime.now(dt.timezone.utc)
     update_source_state(session, source_key="mintrud.gov.ru/docs", success_at=now)
