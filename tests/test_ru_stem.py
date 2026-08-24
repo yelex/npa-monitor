@@ -74,6 +74,47 @@ def test_novyi_matches_declined_forms() -> None:
     assert contains_keyword("новый указ подписан", ("новый",)) is True
 
 
+def test_invalid_does_not_match_unrelated_invalyuta() -> None:
+    """PLAN.md Фаза 9 п.6 / docs/SPEC_classifier_false_positives.md: стандартная
+    обрезка (7 букв -> минус 2) давала стем «инвал», матчащийся на «инвалюта»/
+    «инвалютный» — финансовый термин, не связанный с инвалидностью."""
+    assert contains_keyword("золотовалютные и инвалютные резервы страны выросли", ("инвалид",)) is False
+    assert contains_keyword("инвалютные операции банков ограничены", ("инвалид",)) is False
+
+
+def test_invalid_declined_forms_still_match() -> None:
+    assert contains_keyword("инвалиду назначена выплата", ("инвалид",)) is True
+    assert contains_keyword("оформление инвалидности заняло месяц", ("инвалид",)) is True
+    assert contains_keyword("льготы для инвалидов расширены", ("инвалид",)) is True
+
+
+def test_kontraktnik_does_not_match_unrelated_kontraktny() -> None:
+    """PLAN.md Фаза 9 п.6 / docs/SPEC_classifier_false_positives.md: стандартная
+    обрезка (11 букв -> минус 2) давала стем «контрактн», матчащийся на прилагательное
+    «контрактный»/«контрактная» (юридический/закупочный смысл), не про
+    контрактников-военнослужащих."""
+    assert contains_keyword("квоты распределяются на контрактной основе", ("контрактник",)) is False
+    assert contains_keyword("система контрактных отношений в отрасли", ("контрактник",)) is False
+
+
+def test_kontraktnik_declined_forms_still_match() -> None:
+    assert contains_keyword("контрактнику выплатили денежное довольствие", ("контрактник",)) is True
+    assert contains_keyword("контрактников призвали для участия в СВО", ("контрактник",)) is True
+
+
+def test_vyplata_does_not_match_unrelated_vyplakat() -> None:
+    """PLAN.md Фаза 9 п.6 / docs/SPEC_classifier_false_positives.md: стандартная
+    обрезка (7 букв -> минус 2) давала стем «выпла», матчащийся на «выплакать» —
+    не связанный по смыслу глагол."""
+    assert contains_keyword("она смогла выплакать всю боль после потери", ("выплата",)) is False
+
+
+def test_vyplata_declined_forms_still_match() -> None:
+    assert contains_keyword("ежемесячная выплата ветеранам увеличена", ("выплата",)) is True
+    assert contains_keyword("единовременную выплату получат участники СВО", ("выплата",)) is True
+    assert contains_keyword("социальные выплаты индексированы", ("выплата",)) is True
+
+
 def test_find_matches_returns_matched_keywords() -> None:
     text = "получили компенсацию и новую субсидию"
     assert find_matches(text, ("компенсация", "субсидия", "льгота")) == ("компенсация", "субсидия")
