@@ -11,6 +11,8 @@ from db.models import DocumentSeen, Signal, SourceState
 from db.service import (
     InvalidStatusTransition,
     create_signal,
+    link_document_to_signal,
+    recent_documents_with_titles,
     register_document_seen,
     transition_status,
     update_source_state,
@@ -175,6 +177,61 @@ def test_documents_seen_dedup_via_service(session: Session):
     assert session.query(DocumentSeen).count() == 1
 
 
+def test_register_document_seen_stores_title(session: Session):
+    document, _ = register_document_seen(
+        session, source_key="src", doc_url="https://example.gov.ru/doc/1", title="Заголовок"
+    )
+    session.commit()
+
+    assert document.title == "Заголовок"
+
+
+def test_recent_documents_with_titles_filters_by_window_and_title_presence(session: Session):
+    now = dt.datetime.now(dt.timezone.utc)
+    register_document_seen(session, source_key="src", doc_url="https://example.gov.ru/1", title="Свежий")
+    register_document_seen(session, source_key="src", doc_url="https://example.gov.ru/2", title=None)
+    session.commit()
+    old_doc = DocumentSeen(
+        source_key="src",
+        doc_url="https://example.gov.ru/3",
+        title="Старый",
+        first_seen_at=now - dt.timedelta(days=30),
+    )
+    session.add(old_doc)
+    session.commit()
+
+    recent = recent_documents_with_titles(session, since=now - dt.timedelta(days=5))
+
+    titles = {doc.title for doc in recent}
+    assert titles == {"Свежий"}  # без title и вне окна — не попадают в кандидаты
+
+
+def test_recent_documents_with_titles_excludes_given_id(session: Session):
+    document, _ = register_document_seen(
+        session, source_key="src", doc_url="https://example.gov.ru/1", title="Заголовок"
+    )
+    session.commit()
+
+    recent = recent_documents_with_titles(
+        session, since=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1), exclude_id=document.id
+    )
+
+    assert recent == []
+
+
+def test_link_document_to_signal_sets_signal_id(session: Session):
+    signal = _make_signal(session)
+    document, _ = register_document_seen(
+        session, source_key="src", doc_url="https://example.gov.ru/1", title="Заголовок"
+    )
+    session.commit()
+
+    link_document_to_signal(session, document, signal_id=signal.id)
+    session.commit()
+
+    assert document.signal_id == signal.id
+
+
 def test_documents_seen_unique_constraint_at_db_level(session: Session):
     session.add(DocumentSeen(source_key="src", doc_url="https://example.gov.ru/doc/1"))
     session.commit()
@@ -182,6 +239,42 @@ def test_documents_seen_unique_constraint_at_db_level(session: Session):
     session.add(DocumentSeen(source_key="src", doc_url="https://example.gov.ru/doc/1"))
     with pytest.raises(IntegrityError):
         session.commit()
+
+
+def test_init_db_adds_title_column_to_pre_existing_documents_seen_table(tmp_path):
+    # docs/SPEC_content_dedup.md, раздел 3.1: на уже развёрнутой боевой БД (без Alembic)
+    # documents_seen существует без колонки title — init_db должен добавить её и не
+    # потерять уже накопленные строки, а не упасть на create_all (который не меняет
+    # существующие таблицы).
+    from sqlalchemy import text as sql_text
+
+    engine = make_engine(tmp_path / "legacy.db")
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "CREATE TABLE documents_seen ("
+                "id INTEGER PRIMARY KEY, source_key VARCHAR(128), doc_url TEXT, "
+                "first_seen_at DATETIME, signal_id INTEGER, "
+                "CONSTRAINT uq_documents_seen_doc_url UNIQUE (doc_url))"
+            )
+        )
+        conn.execute(
+            sql_text(
+                "INSERT INTO documents_seen (source_key, doc_url, first_seen_at) "
+                "VALUES ('src', 'https://example.gov.ru/legacy', '2026-01-01 00:00:00')"
+            )
+        )
+
+    init_db(engine)
+
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(documents_seen)")}
+        assert "title" in columns
+        row = conn.execute(
+            sql_text("SELECT doc_url, title FROM documents_seen WHERE doc_url = 'https://example.gov.ru/legacy'")
+        ).one()
+        assert row.doc_url == "https://example.gov.ru/legacy"
+        assert row.title is None  # старые строки — без заголовка, не участвуют в дедупе по содержанию
 
 
 def test_source_state_upsert(session: Session):

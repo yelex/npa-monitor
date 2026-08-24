@@ -8,10 +8,11 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
-from db.models import Signal
+from db.models import DocumentSeen, Signal
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable
+from parser.llm import LLMError
 from parser.models import Publication
 from parser.orchestrator import SourceSpec, process_source, run_all
 
@@ -135,6 +136,88 @@ def test_process_source_dedups_by_canonicalized_url_across_pages(
     # не канонизированный — канонизация только для внутреннего сравнения дублей.
     signal = session.query(Signal).one()
     assert signal.source_url == "http://sfr.gov.ru/n/4?index=9"
+
+
+class _StubLLMClient:
+    def __init__(self, answer: str) -> None:
+        self._answer = answer
+        self.calls = 0
+
+    def complete(self, prompt: str) -> str:
+        self.calls += 1
+        return self._answer
+
+
+class _FailingLLMClient:
+    def complete(self, prompt: str) -> str:
+        raise LLMError("недоступен")
+
+
+def test_process_source_dedups_by_exact_title_across_different_urls(
+    session: Session, classifier: Classifier
+) -> None:
+    # PLAN.md Фаза 9 п.2 / docs/SPEC_content_dedup.md: та же публикация под другим
+    # URL/поддоменом (не схлопывается canonicalize_url) с дословно тем же заголовком —
+    # второй сигнал не создаётся, даже без LLM (точное совпадение заголовка).
+    title = "постановление ветеран боевых действий выплата"
+    page1 = [_pub("sfr.gov.ru/press_center/news", title, "https://a.sfr.gov.ru/n/5", published_at=NOW)]
+    page2 = [_pub("sfr.gov.ru/press_center/news", title, "https://b.sfr.gov.ru/n/6", published_at=NOW)]
+    pages = {1: page1, 2: page2}
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: pages.get(page, []))
+
+    result = process_source(session, classifier, spec, now=NOW, llm_client=None)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.duplicates == 1
+    assert session.query(Signal).count() == 1
+    documents = session.query(DocumentSeen).order_by(DocumentSeen.id).all()
+    assert len(documents) == 2
+    signal_id = session.query(Signal).one().id
+    assert documents[0].signal_id == signal_id
+    assert documents[1].signal_id == signal_id  # второй документ привязан к тому же сигналу
+
+
+def test_process_source_dedups_paraphrased_title_via_llm(session: Session, classifier: Classifier) -> None:
+    original = "постановление ветеран боевых действий новая выплата"
+    paraphrased = "новая выплата ветеранам боевых действий постановление"
+    page1 = [_pub("sfr.gov.ru/press_center/news", original, "https://a.sfr.gov.ru/n/7", published_at=NOW)]
+    page2 = [
+        _pub("sfr.gov.ru/press_center/news", paraphrased, "https://b.sfr.gov.ru/n/8", published_at=NOW)
+    ]
+    pages = {1: page1, 2: page2}
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: pages.get(page, []))
+    llm = _StubLLMClient("ДА")
+
+    result = process_source(session, classifier, spec, now=NOW, llm_client=llm)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.duplicates == 1
+    assert session.query(Signal).count() == 1
+    assert llm.calls == 1
+
+
+def test_process_source_creates_second_signal_when_llm_unavailable_for_paraphrased_title(
+    session: Session, classifier: Classifier
+) -> None:
+    # Без LLM (не сконфигурирован/недоступен) переформулированный заголовок не считается
+    # дублем — деградация до точной нормализации, не полный отказ от дедупа.
+    original = "постановление ветеран боевых действий новая выплата"
+    paraphrased = "новая выплата ветеранам боевых действий постановление"
+    page1 = [_pub("sfr.gov.ru/press_center/news", original, "https://a.sfr.gov.ru/n/9", published_at=NOW)]
+    page2 = [
+        _pub("sfr.gov.ru/press_center/news", paraphrased, "https://b.sfr.gov.ru/n/10", published_at=NOW)
+    ]
+    pages = {1: page1, 2: page2}
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: pages.get(page, []))
+
+    result = process_source(session, classifier, spec, now=NOW, llm_client=_FailingLLMClient())
+    session.commit()
+
+    assert result.new_signals == 2
+    assert result.duplicates == 0
+    assert session.query(Signal).count() == 2
 
 
 def test_process_source_rejects_non_whitelisted_domain(session: Session, classifier: Classifier) -> None:

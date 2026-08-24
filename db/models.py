@@ -140,6 +140,10 @@ class DocumentSeen(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     source_key: Mapped[str] = mapped_column(String(128))
     doc_url: Mapped[str] = mapped_column(Text)
+    # Заголовок публикации на момент обнаружения — материал для вторичного дедупа по
+    # содержанию (PLAN.md Фаза 9 п.2, docs/SPEC_content_dedup.md), не показывается
+    # эксперту. NULL у записей, созданных до этой задачи.
+    title: Mapped[str | None] = mapped_column(Text, default=None)
     first_seen_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
     signal_id: Mapped[int | None] = mapped_column(
         ForeignKey("signals.id", ondelete="SET NULL"), default=None

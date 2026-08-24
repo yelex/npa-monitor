@@ -121,20 +121,48 @@ def register_document_seen(
     source_key: str,
     doc_url: str,
     signal_id: int | None = None,
+    title: str | None = None,
 ) -> tuple[DocumentSeen, bool]:
     """Дедуп публикаций по URL (AGENTS.md раздел 4/11).
 
     Возвращает (запись, created) — created=False, если публикация уже была обработана
-    ранее и новую карточку сигнала создавать не нужно.
+    ранее и новую карточку сигнала создавать не нужно. `title` — заголовок публикации,
+    материал для вторичного дедупа по содержанию (`recent_documents_with_titles`,
+    PLAN.md Фаза 9 п.2, docs/SPEC_content_dedup.md), не используется здесь для сравнения.
     """
     existing = session.scalar(select(DocumentSeen).where(DocumentSeen.doc_url == doc_url))
     if existing is not None:
         return existing, False
 
-    document = DocumentSeen(source_key=source_key, doc_url=doc_url, signal_id=signal_id)
+    document = DocumentSeen(source_key=source_key, doc_url=doc_url, signal_id=signal_id, title=title)
     session.add(document)
     session.flush()
     return document, True
+
+
+def recent_documents_with_titles(
+    session: Session,
+    *,
+    since: dt.datetime,
+    exclude_id: int | None = None,
+) -> list[DocumentSeen]:
+    """Документы за окно `[since, now)` с непустым `title` — кандидаты для вторичного
+    дедупа по содержанию (`parser.dedup.find_duplicate_title`, PLAN.md Фаза 9 п.2).
+    Записи, накопленные до этой задачи (`title IS NULL`), не участвуют.
+    """
+    stmt = select(DocumentSeen).where(
+        DocumentSeen.first_seen_at >= since, DocumentSeen.title.is_not(None)
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(DocumentSeen.id != exclude_id)
+    return list(session.scalars(stmt))
+
+
+def link_document_to_signal(session: Session, document: DocumentSeen, *, signal_id: int | None) -> None:
+    """Привязывает запись `documents_seen` к сигналу найденного дубликата по содержанию
+    (может быть `None`, если дубликат сам оказался нерелевантным и сигнала не получил)."""
+    document.signal_id = signal_id
+    session.flush()
 
 
 def update_source_state(

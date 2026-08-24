@@ -5,12 +5,20 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Base
 
 DEFAULT_DB_PATH = Path("npa_monitor.db")
+
+# (таблица, колонка, DDL-тип) — точечный обход отсутствия Alembic (раздел выше) для
+# колонок, добавленных в уже развёрнутую боевую БД: create_all не меняет существующие
+# таблицы, а на VPS уже накоплены строки documents_seen (пилот с 2026-08-20). Не замена
+# полноценных миграций — только для этого случая, см. docs/SPEC_content_dedup.md, раздел 3.1.
+_COLUMNS_ADDED_AFTER_INITIAL_SCHEMA = (
+    ("documents_seen", "title", "TEXT"),
+)
 
 
 def make_engine(db_path: str | Path = DEFAULT_DB_PATH) -> Engine:
@@ -28,8 +36,28 @@ def make_engine(db_path: str | Path = DEFAULT_DB_PATH) -> Engine:
 
 
 def init_db(engine: Engine) -> None:
-    """create_all — вся DDL-схема, миграции (Alembic) появятся на следующем этапе."""
+    """create_all — вся DDL-схема, миграции (Alembic) появятся на следующем этапе.
+
+    Перед create_all — точечная подстраховка для колонок, добавленных к уже
+    существующим таблицам после первого деплоя (`_COLUMNS_ADDED_AFTER_INITIAL_SCHEMA`):
+    create_all создаёт только отсутствующие таблицы целиком, не добавляет колонки в уже
+    существующие.
+    """
+    _ensure_columns(engine)
     Base.metadata.create_all(engine)
+
+
+def _ensure_columns(engine: Engine) -> None:
+    with engine.begin() as conn:
+        for table, column, ddl_type in _COLUMNS_ADDED_AFTER_INITIAL_SCHEMA:
+            existing_tables = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if existing_tables is None:
+                continue  # таблицы ещё нет — её создаст create_all с полной схемой ниже
+            columns = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
 
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:

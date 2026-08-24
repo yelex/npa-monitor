@@ -30,11 +30,12 @@ from collections.abc import Callable, Iterable
 from sqlalchemy.orm import Session
 
 from db.catalog import all_domains
-from db.service import register_document_seen
+from db.service import link_document_to_signal, recent_documents_with_titles, register_document_seen
 from parser.classifier import Classifier
-from parser.dedup import canonicalize_url
+from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_title
 from parser.fetcher import SourceUnavailable
 from parser.filters import is_domain_whitelisted, is_excluded_path
+from parser.llm import ClassifierLLMClient, get_default_client
 from parser.models import Publication
 from parser.signals import build_signal
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
@@ -100,6 +101,7 @@ def process_source(
     *,
     whitelisted_domains: set[str] | None = None,
     now: dt.datetime | None = None,
+    llm_client: ClassifierLLMClient | None = None,
 ) -> SourceRunResult:
     now = now or dt.datetime.now(dt.timezone.utc)
     whitelisted_domains = whitelisted_domains if whitelisted_domains is not None else all_domains()
@@ -126,7 +128,7 @@ def process_source(
                         pub.title,
                     )
                     break
-                _process_publication(session, classifier, pub, whitelisted_domains, result)
+                _process_publication(session, classifier, pub, whitelisted_domains, result, now, llm_client)
 
             # PLAN.md Фаза 9 п.1 / docs/SPEC_stale_publications_filter.md: если ни одна
             # публикация на странице не дала машиночитаемую дату, проверка «старше окна»
@@ -170,6 +172,8 @@ def _process_publication(
     pub: Publication,
     whitelisted_domains: set[str],
     result: SourceRunResult,
+    now: dt.datetime,
+    llm_client: ClassifierLLMClient | None,
 ) -> None:
     log.debug("публикация: %r (%s) %s", pub.title, pub.published_at, pub.url)
 
@@ -187,12 +191,28 @@ def _process_publication(
     # `?index=N`-варианты того же документа проходят как разные публикации. Сигналу
     # (build_signal ниже) при этом всё равно передаётся оригинальный pub.url — эксперт
     # должен видеть реальную ссылку источника, канонизация нужна только для сравнения.
-    _, created = register_document_seen(
-        session, source_key=pub.source_key, doc_url=canonicalize_url(pub.url)
+    document, created = register_document_seen(
+        session, source_key=pub.source_key, doc_url=canonicalize_url(pub.url), title=pub.title
     )
     if not created:
         result.duplicates += 1
         log.debug("  уже обработана ранее (дубликат по URL) — пропуск")
+        return
+
+    # PLAN.md Фаза 9 п.2 / docs/SPEC_content_dedup.md: URL новый, но публикация может
+    # быть той же новостью под другим URL (синдикация по поддоменам, зеркала на другом
+    # домене) — вторичный слой дедупа по заголовку, проверяется только для новых URL
+    # (не на каждом повторном обходе), чтобы не звать LLM впустую.
+    recent = recent_documents_with_titles(
+        session, since=now - TITLE_DEDUP_WINDOW, exclude_id=document.id
+    )
+    candidates = [(doc.id, doc.title, doc.signal_id) for doc in recent]
+    match = find_duplicate_title(pub.title, candidates, llm_client=llm_client)
+    if match is not None:
+        _, matched_signal_id = match
+        link_document_to_signal(session, document, signal_id=matched_signal_id)
+        result.duplicates += 1
+        log.debug("  совпадает по содержанию с ранее увиденной публикацией — пропуск")
         return
 
     trace = classifier.explain(pub)
@@ -200,10 +220,18 @@ def _process_publication(
 
     signal = build_signal(session, pub, trace.result)
     if signal is not None:
+        # Побочная находка при добавлении content-дедупа (docs/SPEC_content_dedup.md):
+        # documents_seen.signal_id раньше нигде не проставлялся при создании сигнала —
+        # без этого привязка последующих content-дублей к сигналу (find_duplicate_title
+        # выше) всегда получала signal_id=None по цепочке. Линкуем здесь же.
+        link_document_to_signal(session, document, signal_id=signal.id)
         result.new_signals += 1
         log.debug("  -> сигнал создан, id=%s", signal.id)
     else:
         result.irrelevant += 1
+
+
+_UNSET = object()  # отличает "llm_client не передан" (взять get_default_client()) от "явно None"
 
 
 def run_all(
@@ -213,11 +241,19 @@ def run_all(
     specs: Iterable[SourceSpec] | None = None,
     ru_proxy_url: str | None = None,
     now: dt.datetime | None = None,
+    llm_client: ClassifierLLMClient | None = _UNSET,  # type: ignore[assignment]
 ) -> list[SourceRunResult]:
     """Обходит все источники по очереди; сбой одного не прерывает обход остальных
     (AGENTS.md раздел 12). Коммитит после каждого источника — частичный сбой не
-    откатывает уже обработанные."""
+    откатывает уже обработанные.
+
+    `llm_client` — вторичный дедуп по содержанию (docs/SPEC_content_dedup.md). По
+    умолчанию не передан — берётся `parser.llm.get_default_client()` (`None`, если GLM
+    не сконфигурирован — LLM необязателен). Явный `llm_client=None` отключает LLM-
+    сравнение (используется в тестах для детерминированности)."""
     classifier = classifier or Classifier.load()
+    if llm_client is _UNSET:
+        llm_client = get_default_client()
     specs = list(specs) if specs is not None else [
         *build_source_specs(ru_proxy_url=ru_proxy_url),
         *build_other_source_specs(),
@@ -226,7 +262,9 @@ def run_all(
 
     results = []
     for spec in specs:
-        result = process_source(session, classifier, spec, whitelisted_domains=whitelisted_domains, now=now)
+        result = process_source(
+            session, classifier, spec, whitelisted_domains=whitelisted_domains, now=now, llm_client=llm_client
+        )
         session.commit()
         results.append(result)
         log.info(
