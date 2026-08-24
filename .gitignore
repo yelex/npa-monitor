@@ -15,6 +15,7 @@ build/
 *.db-shm
 *.db-wal
 .env
+data/autoupdate_spool/
 
 # Ralph loop
 ralph_logs/

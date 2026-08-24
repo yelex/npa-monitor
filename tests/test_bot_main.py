@@ -12,13 +12,16 @@ reason= вместо rejection_reason=, naive datetime.now() против tz-awa
 from __future__ import annotations
 
 import datetime as dt
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import bot.main as bot_main
+from bot.autoupdate_client import AutoUpdateAgentClient
 from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
-from db.service import create_signal
+from db.service import create_signal, transition_status
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +29,7 @@ def _isolated_bot_state(tmp_path, monkeypatch):
     """Своя БД и allowlist на тест — без завязки на реальный .env/module-level кэши."""
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("ALLOWED_TELEGRAM_USER_IDS", "111")
+    monkeypatch.setenv("AUTOUPDATE_SPOOL_DIR", str(tmp_path / "autoupdate_spool"))
     bot_main.get_settings.cache_clear()
     bot_main._session_factory = None
     yield
@@ -601,9 +605,15 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     factory = bot_main.get_session_factory()
     with factory() as session:
         assert session.get(bot_main.Signal, sig_id).npa_link == "https://sfr.gov.ru/document/1"
-    # AGENTS.md раздел 15: «бот передаёт ссылку и measureId агенту через адаптер» —
-    # адаптер (пусть и заглушка) обязан быть вызван с итоговой ссылкой и measure_id.
-    sent.assert_called_once_with("https://sfr.gov.ru/document/1", None)
+    # AGENTS.md раздел 15 / docs/SPEC_autoupdate_agent_contract.md раздел 3.7: адаптер
+    # обязан быть вызван с сигналом, итоговой ссылкой на НПА, discovery_url, ЖС и регионом.
+    assert sent.call_count == 1
+    call_signal, call_npa_url, call_discovery_url, call_categories, call_region = sent.call_args.args
+    assert call_signal.id == sig_id
+    assert call_npa_url == "https://sfr.gov.ru/document/1"
+    assert call_discovery_url == "https://sfr.gov.ru/1"  # Signal.source_url из _make_signal
+    assert call_categories == ["veterans"]
+    assert call_region == "rf"
 
 
 async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_call(
@@ -627,7 +637,7 @@ async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_c
     fetch_mock.assert_not_called()
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     assert "автопроверку" in cb_region.message.answer.await_args.args[0]
-    sent.assert_called_once_with("https://docs.cntd.ru/document/408415942", None)
+    assert sent.call_args.args[1] == "https://docs.cntd.ru/document/408415942"
 
 
 async def test_on_npa_link_uses_ru_proxy_access_for_ru_proxy_domain(monkeypatch) -> None:
@@ -817,6 +827,202 @@ async def test_finish_npa_flow_no_audit_reason_without_divergence() -> None:
         last = signal.history[-1]
         assert last.to_status == SignalStatus.SENT_TO_AGENT
         assert last.reason is None
+
+
+# --- docs/SPEC_autoupdate_agent_contract.md: контракт задачи, атомарность, ------
+# идемпотентность, дозапись при старте, карточки по результатам --------------------
+
+
+def _spool_dir() -> Path:
+    return Path(bot_main.get_settings().autoupdate_spool_dir)
+
+
+def test_autoupdate_client_send_writes_task_contract_with_real_enum_codes() -> None:
+    """SPEC раздел 3.3: schema_version=1, signal_id отдельным полем (не парсим
+    `task_id`), categories/region — реальные `.value` из `db/enums.py`."""
+    sig_id = _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO], region=Region.MOSCOW)
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        client = AutoUpdateAgentClient()
+        path = client.send(
+            signal,
+            "https://publication.pravo.gov.ru/document/1",
+            signal.source_url,
+            ["veterans", "svo"],
+            "moscow",
+        )
+
+    assert path == _spool_dir() / "tasks" / f"sig-{sig_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    created_at = payload.pop("created_at")
+    assert payload == {
+        "schema_version": 1,
+        "task_id": f"sig-{sig_id}",
+        "signal_id": sig_id,
+        "npa_url": "https://publication.pravo.gov.ru/document/1",
+        "discovery_url": "https://sfr.gov.ru/1",
+        "categories": ["veterans", "svo"],
+        "region": "moscow",
+    }
+    dt.datetime.fromisoformat(created_at)  # не падает — валидный ISO 8601
+
+
+def test_autoupdate_client_send_allows_null_npa_url_with_discovery_url() -> None:
+    """SPEC раздел 3.3: `npa_url: null` допустим, если есть `discovery_url`."""
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        path = AutoUpdateAgentClient().send(signal, None, signal.source_url, ["veterans"], "rf")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["npa_url"] is None
+    assert payload["discovery_url"] == "https://sfr.gov.ru/1"
+
+
+def test_autoupdate_client_send_writes_atomically_no_leftover_tmp_file() -> None:
+    """SPEC раздел 3.5: tmp-файл + `os.rename` — после записи в каталоге задач должен
+    остаться только итоговый файл, без временного `.tmp`."""
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        AutoUpdateAgentClient().send(signal, "https://sfr.gov.ru/document/1", signal.source_url, [], "rf")
+
+    files = sorted(p.name for p in (_spool_dir() / "tasks").iterdir())
+    assert files == [f"sig-{sig_id}.json"]
+
+
+def test_autoupdate_client_send_is_idempotent_overwrites_same_task_file() -> None:
+    """SPEC раздел 3.3/3.7: `task_id = f"sig-{signal_id}"` — повторный `send()`
+    перезаписывает тот же файл, не плодит дубликаты (используется сверкой при старте)."""
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        client = AutoUpdateAgentClient()
+        client.send(signal, "https://sfr.gov.ru/first", signal.source_url, ["veterans"], "rf")
+        path = client.send(signal, "https://sfr.gov.ru/second", signal.source_url, ["svo"], "moscow")
+
+    files = list((_spool_dir() / "tasks").iterdir())
+    assert len(files) == 1
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["npa_url"] == "https://sfr.gov.ru/second"
+    assert payload["region"] == "moscow"
+
+
+async def test_finish_npa_flow_does_not_commit_when_task_write_fails(monkeypatch) -> None:
+    """SPEC раздел 3.2 (ключевой фикс ревью): запись задачи ДО commit — если запись
+    упала, переход не коммитится (сигнал остаётся «В работе»), аналитик видит ошибку."""
+    sig_id = _make_in_progress_signal()
+    monkeypatch.setattr(
+        bot_main._autoupdate_client, "send", MagicMock(side_effect=OSError("disk full"))
+    )
+
+    state, message, cb_confirm, cb_region = await _run_full_npa_flow(sig_id)
+
+    assert _get_status(sig_id) == SignalStatus.IN_PROGRESS  # откат, не SENT_TO_AGENT
+    assert "не удалось передать" in cb_region.message.answer.await_args.args[0].lower()
+    assert not (_spool_dir() / "tasks" / f"sig-{sig_id}.json").exists()
+
+
+async def test_reconcile_spool_tasks_writes_missing_task_for_sent_to_agent_signal() -> None:
+    """SPEC раздел 3.2: сверка при старте — SENT_TO_AGENT без файла в spool -> дозапись."""
+    sig_id = _make_signal(categories=[SignalCategory.DISABLED], region=Region.MOSCOW)
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.IN_PROGRESS)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+
+    task_file = _spool_dir() / "tasks" / f"sig-{sig_id}.json"
+    assert not task_file.exists()
+
+    with factory() as session:
+        written = bot_main._reconcile_spool_tasks(session, bot_main._autoupdate_client)
+
+    assert written == 1
+    payload = json.loads(task_file.read_text(encoding="utf-8"))
+    assert payload["signal_id"] == sig_id
+    assert payload["categories"] == ["disabled"]
+    assert payload["region"] == "moscow"
+
+
+async def test_reconcile_spool_tasks_skips_signal_with_existing_task_file() -> None:
+    sig_id = _make_signal()
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        transition_status(session, signal, SignalStatus.IN_PROGRESS)
+        transition_status(session, signal, SignalStatus.SENT_TO_AGENT)
+        session.commit()
+        bot_main._autoupdate_client.send(signal, None, signal.source_url, [], "rf")
+
+    with factory() as session:
+        written = bot_main._reconcile_spool_tasks(session, bot_main._autoupdate_client)
+
+    assert written == 0
+
+
+def _write_result(spool_dir: Path, name: str, payload: dict) -> Path:
+    results = spool_dir / "results"
+    results.mkdir(parents=True, exist_ok=True)
+    path = results / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+async def test_scan_autoupdate_results_sends_card_and_archives_then_stays_silent() -> None:
+    """SPEC раздел 3.6/4: фикстура `results/sig-<id>.json` -> карточка аналитику,
+    перемещение в `results/.processed/`; повторный скан по тому же каталогу — тишина."""
+    sig_id = _make_in_progress_signal()
+    _write_result(
+        _spool_dir(),
+        f"sig-{sig_id}.json",
+        {
+            "schema_version": 1,
+            "task_id": f"sig-{sig_id}",
+            "signal_id": sig_id,
+            "status": "done",
+            "finished_at": "2026-08-25T01:40:00+00:00",
+            "summary": "Найдено: изменение ежемесячной выплаты ВБД",
+        },
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    sent_count = await bot_main.scan_autoupdate_results(bot)
+
+    assert sent_count == 1
+    bot.send_message.assert_awaited_once()
+    card_text = bot.send_message.await_args.args[1]
+    assert f"сигналу {sig_id}" in card_text
+    assert "Найдено: изменение ежемесячной выплаты ВБД" in card_text
+    assert not (_spool_dir() / "results" / f"sig-{sig_id}.json").exists()
+    assert (_spool_dir() / "results" / ".processed" / f"sig-{sig_id}.json").exists()
+
+    bot.send_message.reset_mock()
+    sent_count_again = await bot_main.scan_autoupdate_results(bot)
+    assert sent_count_again == 0
+    bot.send_message.assert_not_awaited()
+
+
+async def test_scan_autoupdate_results_ignores_unknown_signal_id_and_archives_it() -> None:
+    _write_result(
+        _spool_dir(),
+        "sig-999999.json",
+        {"schema_version": 1, "task_id": "sig-999999", "signal_id": 999999, "status": "error"},
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    sent_count = await bot_main.scan_autoupdate_results(bot)
+
+    assert sent_count == 0
+    bot.send_message.assert_not_awaited()
+    assert (_spool_dir() / "results" / ".processed" / "sig-999999.json").exists()
 
 
 async def test_cmd_today_ignores_unauthorized_user() -> None:

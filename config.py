@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     yandex_search_api_key: str = ""
     yandex_search_folder_id: str = ""
 
+    # Агент автообновления (docs/SPEC_autoupdate_agent_contract.md): файловый spool —
+    # единственная реализация сейчас (`bot/autoupdate_client.py`); "http" зарезервировано
+    # на будущее (спека, раздел 5 «НЕ входит») — переключение не требует правок bot/main.py.
+    autoupdate_spool_dir: str = "data/autoupdate_spool"
+    autoupdate_mode: str = "spool"  # spool | http
+
     @property
     def allowed_user_ids(self) -> set[int]:
         if not self.allowed_telegram_user_ids.strip():

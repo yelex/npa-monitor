@@ -412,21 +412,17 @@ webhook) пока нет — подробности и открытый выбо
    `government.py`, реально отдали данные через `RU_PROXY_URL=http://95.142.42.28:8888`
    (30/20/20 публикаций соответственно). Остаётся то же самое подтвердить именно с
    боевого VPS перед продакшен-запуском (allow-лист tinyproxy может отличаться).
-8. 🟡 Контракт API/webhook внешнего агента автообновления — уточнено: агент
-   автообновления это локальный проект `/Users/user/dev/auto` (LangGraph-пайплайн
-   `product_agent`, извлекает `BenefitMeasure`/`ExtractedDocument` — поля практически
-   совпадают с нашим словарём, раздел 8). Это **не готовый вызываемый API**: HTTP-роуты
-   (`POST /api/v1/extractor/process_quarterly` и т.п.) как самостоятельный сервис не
-   поднимаются. Есть рабочий скрипт
-   `run_offline_pipeline.py` (`run_pipeline(raw_json)`) для локального прогона, но он
-   принимает **текст документа**, а не URL — наш бот должен будет сам скачать текст НПА
-   перед вызовом. Открытым остаётся выбор стратегии интеграции для
-   `AutoUpdateAgentClient` (PLAN.md, Фаза 5): (а) вызывать `product_agent`/
-   `run_offline_pipeline.py` как библиотеку/сабпроцесс локально, или (б) ждать реально
-   задеплоенный Sberbank-эндпоинт и интегрироваться по HTTP. Решить перед началом
-   Фазы 5. Интерфейс уже выделен — `bot/autoupdate_client.py::AutoUpdateAgentClient`
-   (заглушка, логирует вызов; вызывается из `bot/main.py::on_npa_link` при переходе в
-   «Передан агенту») — переход на реальный контракт не потребует правок `bot/main.py`.
+8. 🟢 Контракт API/webhook внешнего агента автообновления — решено (2026-08-24,
+   `docs/SPEC_autoupdate_agent_contract.md`): вместо ожидания HTTP-эндпоинта или
+   вызова `/Users/user/dev/auto` как библиотеки/сабпроцесса, стык минимальный и
+   файловый — `AUTOUPDATE_SPOOL_DIR/tasks/sig-<id>.json` (npa_url + ЖС + регион,
+   пишет бот атомарно ДО коммита перехода в «Передан агенту») /
+   `AUTOUPDATE_SPOOL_DIR/results/sig-<id>.json` (агент кладёт результат, бот читает
+   раз в 5 мин и присылает карточку аналитику, архивирует). Реестр мер, XLSX/БД,
+   diff — внутреннее дело агента, в контракт не входят. `AUTOUPDATE_MODE=spool|http` —
+   http зарезервирован на будущее, не реализован. Реализовано —
+   `bot/autoupdate_client.py::AutoUpdateAgentClient` (spool),
+   `bot/main.py::_finish_npa_flow`/`_reconcile_spool_tasks`/`_results_scan_loop`.
 9. 🟢 Пример использования GLM и креды — найдены в `/Users/user/dev/auto`:
    `GLM_PERSONAL_API_KEY`/`GLM_PERSONAL_BASE_URL`/`GLM_PERSONAL_MODEL` в
    `/Users/user/dev/auto/.env`, паттерн вызова —

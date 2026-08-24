@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import html
+import json
 import logging
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -24,7 +26,7 @@ from aiogram.types import (
 )
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from bot.autoupdate_client import AutoUpdateAgentClient
+from bot.autoupdate_client import AutoUpdateAgentClient, archive_result, list_pending_results, task_path
 from config import get_settings
 from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
 from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus
@@ -723,9 +725,12 @@ async def _finish_npa_flow(
 ) -> None:
     """Финальный шаг флоу (SPEC решение 1): одна DB-сессия — npa_link, перезапись
     `signal_categories`/`Signal.region` подтверждёнными значениями, `transition_status`
-    в SENT_TO_AGENT (с аудитом расхождения), commit, `_autoupdate_client.send`, ответ
-    аналитику, `state.clear()`. `target` — объект с `.answer()` (Message или
-    `CallbackQuery.message`), гонки статусов — как в остальном коде (try/except)."""
+    в SENT_TO_AGENT (с аудитом расхождения), `_autoupdate_client.send` (запись задачи в
+    spool ДО commit — docs/SPEC_autoupdate_agent_contract.md раздел 3.2: если запись
+    упала, переход не коммитится, аналитик видит ошибку и может повторить — `send()`
+    идемпотентен, перезапись безопасна), commit, ответ аналитику, `state.clear()`.
+    `target` — объект с `.answer()` (Message или `CallbackQuery.message`), гонки
+    статусов — как в остальном коде (try/except)."""
     data = await state.get_data()
     categories: list[str] = data.get("categories", [])
     npa_link: str | None = data.get("npa_link")
@@ -755,8 +760,22 @@ async def _finish_npa_flow(
             )
             await state.clear()
             return
+
+        try:
+            _autoupdate_client.send(s, s.npa_link, s.source_url, categories, region.value)
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            log.exception(
+                "автообновление: не удалось записать задачу для сигнала %s — переход отменён", sig_id
+            )
+            await target.answer(
+                "⚠️ Не удалось передать сигнал агенту автообновления (сбой записи задачи). "
+                "Статус не изменён, попробуйте ещё раз."
+            )
+            await state.clear()
+            return
+
         db.commit()
-        _autoupdate_client.send(s.npa_link, s.measure_id)
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
 
     if autocheck_skipped:
@@ -880,6 +899,101 @@ async def _digest_loop(bot: Bot) -> None:
             log.exception("digest loop error")
 
 
+# --- автообновление: сверка spool при старте + карточки по результатам ----------
+
+
+def _reconcile_spool_tasks(db: Session, client: AutoUpdateAgentClient) -> int:
+    """docs/SPEC_autoupdate_agent_contract.md раздел 3.2: сигналы в SENT_TO_AGENT без
+    файла задачи в spool (обычный путь `_finish_npa_flow` пишет задачу до commit — сюда
+    можно попасть только если файл потерян/удалён вручную между запусками) -> дозапись,
+    `AutoUpdateAgentClient.send` идемпотентен. Вызывается при старте бота (`main()`)."""
+    spool_dir = Path(get_settings().autoupdate_spool_dir)
+    signals = (
+        db.query(Signal)
+        .options(selectinload(Signal.categories))
+        .filter(Signal.status == SignalStatus.SENT_TO_AGENT)
+        .all()
+    )
+    written = 0
+    for s in signals:
+        if task_path(spool_dir, s.id).exists():
+            continue
+        cats = [c.category.value for c in s.categories]
+        client.send(s, s.npa_link, s.source_url, cats, s.region.value)
+        written += 1
+    if written:
+        log.info("автообновление: дозаписано %d задач(и) в spool при сверке", written)
+    return written
+
+
+RESULTS_SCAN_INTERVAL = 300  # 5 минут, SPEC раздел 3.6
+
+RESULT_STATUS_LABELS = {"done": "готово", "nothing_found": "ничего не найдено", "error": "ошибка"}
+
+
+def result_card(payload: dict, s: Signal) -> str:
+    """Карточка по результату агента (SPEC раздел 3.4/3.6): статус, summary (+details,
+    если есть). Решение о переходе в «Завершён» — за аналитиком, `/complete <id>`."""
+    status = payload.get("status", "?")
+    status_label = RESULT_STATUS_LABELS.get(status, status)
+    title = html.escape(s.title or "(без названия)", quote=False)
+    summary = html.escape(str(payload.get("summary") or "—"), quote=False)
+    lines = [
+        f"🤖 Агент завершил задачу по сигналу {s.id}: {status_label}",
+        f"<b>{title}</b>",
+        summary,
+    ]
+    details = payload.get("details")
+    if details:
+        lines.append(html.escape(str(details), quote=False))
+    lines.append(f"Проверьте результат и выполните /complete {s.id}, если всё верно.")
+    return "\n".join(lines)
+
+
+async def scan_autoupdate_results(bot: Bot) -> int:
+    """SPEC раздел 3.6: сканирует `results/*.json`, шлёт карточку аналитику, архивирует
+    в `results/.processed/`. Возвращает число отправленных карточек (для тестов/логов)."""
+    spool_dir = Path(get_settings().autoupdate_spool_dir)
+    sent_count = 0
+    for path in list_pending_results(spool_dir):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            log.exception("автообновление: не удалось прочитать результат %s", path)
+            continue
+
+        signal_id = payload.get("signal_id")
+        s = None
+        if isinstance(signal_id, int):
+            with get_session_factory()() as db:
+                s = db.get(Signal, signal_id)
+        if s is None:
+            # SPEC раздел 3.5: неизвестный signal_id — карточку не шлём, но архивируем,
+            # иначе тот же файл пересканируется и логирует warning каждые 5 минут вечно.
+            log.warning(
+                "автообновление: результат с неизвестным signal_id=%r (%s), пропуск",
+                signal_id, path,
+            )
+            archive_result(path, spool_dir)
+            continue
+
+        text = result_card(payload, s)
+        for uid in get_settings().allowed_user_ids:
+            await bot.send_message(uid, text)
+        archive_result(path, spool_dir)
+        sent_count += 1
+    return sent_count
+
+
+async def _results_scan_loop(bot: Bot) -> None:
+    while True:
+        try:
+            await scan_autoupdate_results(bot)
+        except Exception:  # noqa: BLE001
+            log.exception("results scan loop error")
+        await asyncio.sleep(RESULTS_SCAN_INTERVAL)
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
@@ -892,13 +1006,18 @@ async def main() -> None:
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    # SPEC раздел 3.2: сверка spool при старте — до начала поллинга.
+    with get_session_factory()() as db:
+        _reconcile_spool_tasks(db, _autoupdate_client)
     reminder = asyncio.create_task(_reminder_loop(bot))
     digest = asyncio.create_task(_digest_loop(bot))
+    results_scan = asyncio.create_task(_results_scan_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
         reminder.cancel()
         digest.cancel()
+        results_scan.cancel()
 
 
 if __name__ == "__main__":
