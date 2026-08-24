@@ -147,3 +147,27 @@ def all_domains(
     domains = {source.domain for group in sources.values() for source in group}
     domains |= {source.domain for region in regions for source in region.sources}
     return domains
+
+
+def access_for_domain(
+    domain: str,
+    sources: dict[str, tuple[Source, ...]] | None = None,
+    regions: tuple[RegionEntry, ...] | None = None,
+) -> str | None:
+    """`Source.access` для домена (с поддоменами, та же логика совпадения, что
+    `parser/filters.py::is_domain_whitelisted`) — `None`, если домен не в справочнике.
+
+    Нужен там, где перед сетевым запросом (`parser/fetcher.py::fetch`) нужно знать не
+    только «домен разрешён», но и как именно к нему обращаться (`bot/main.py::on_npa_link`).
+    """
+    sources = sources if sources is not None else load_sources()
+    regions = regions if regions is not None else load_regions()
+
+    all_sources = [source for group in sources.values() for source in group]
+    all_sources += [source for region in regions for source in region.sources]
+
+    domain = domain.lower()
+    for source in all_sources:
+        if domain == source.domain or domain.endswith(f".{source.domain}"):
+            return source.access
+    return None

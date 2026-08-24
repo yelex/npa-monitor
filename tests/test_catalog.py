@@ -9,6 +9,7 @@ import pytest
 from db.catalog import (
     CatalogError,
     Source,
+    access_for_domain,
     all_domains,
     load_classification_keywords,
     load_life_situations,
@@ -54,6 +55,17 @@ def test_all_domains_merges_federal_other_and_regional() -> None:
     assert "sfr.gov.ru" in domains  # federal
     assert "garant.ru" in domains  # other
     assert "mos.ru" in domains  # regional (Москва)
+
+
+def test_access_for_domain_returns_access_by_exact_or_subdomain_match() -> None:
+    assert access_for_domain("sfr.gov.ru") == "direct"
+    assert access_for_domain("www.sfr.gov.ru") == "direct"  # поддомен
+    assert access_for_domain("kremlin.ru") == "ru_proxy"
+    assert access_for_domain("docs.cntd.ru") == "unsupported"
+
+
+def test_access_for_domain_returns_none_for_unknown_domain() -> None:
+    assert access_for_domain("evil.example.com") is None
 
 
 def test_new_life_situation_picked_up_without_code_change(tmp_path: Path) -> None:

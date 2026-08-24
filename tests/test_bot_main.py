@@ -511,6 +511,57 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
     sent.assert_called_once_with("https://sfr.gov.ru/document/1", None)
 
 
+async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_call(
+    monkeypatch,
+) -> None:
+    """docs/SPEC_bot_npa_link_check.md: docs.cntd.ru размечен access=unsupported (сетевой
+    доступ невозможен даже через прокси) — бот должен принимать такую ссылку на доверии,
+    не пытаясь её проверить (иначе — 100%-й false negative, см. спеку).
+    """
+    sig_id = _make_in_progress_signal()
+    fetch_mock = MagicMock(side_effect=AssertionError("fetch не должен вызываться для unsupported"))
+    monkeypatch.setattr(bot_main, "fetch", fetch_mock)
+    sent = MagicMock()
+    monkeypatch.setattr(bot_main._autoupdate_client, "send", sent)
+    state = AsyncMock()
+    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
+    message = MagicMock()
+    message.from_user.id = 111
+    message.text = "https://docs.cntd.ru/document/408415942"
+    message.answer = AsyncMock()
+
+    await bot_main.on_npa_link(message, state)
+
+    fetch_mock.assert_not_called()
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    assert "автопроверку" in message.answer.await_args.args[0]
+    sent.assert_called_once_with("https://docs.cntd.ru/document/408415942", None)
+
+
+async def test_on_npa_link_uses_ru_proxy_access_for_ru_proxy_domain(monkeypatch) -> None:
+    """Раньше `access="direct"` был захардкожен — ссылки на ru_proxy-домены
+    (kremlin.ru и т.п.) неизбежно проваливали бы проверку доступности вне RSNET.
+    """
+    sig_id = _make_in_progress_signal()
+    fetch_mock = MagicMock(return_value=None)
+    monkeypatch.setattr(bot_main, "fetch", fetch_mock)
+    monkeypatch.setattr(bot_main._autoupdate_client, "send", MagicMock())
+    state = AsyncMock()
+    state.get_data = AsyncMock(return_value={"sig_id": sig_id})
+    message = MagicMock()
+    message.from_user.id = 111
+    message.text = "https://kremlin.ru/acts/1"
+    message.answer = AsyncMock()
+
+    await bot_main.on_npa_link(message, state)
+
+    fetch_mock.assert_called_once_with(
+        "https://kremlin.ru/acts/1",
+        access="ru_proxy",
+        ru_proxy_url=bot_main.get_settings().ru_proxy_url,
+    )
+
+
 async def test_on_npa_link_shows_message_instead_of_crashing_when_already_sent_to_agent(
     monkeypatch,
 ) -> None:

@@ -26,13 +26,13 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from bot.autoupdate_client import AutoUpdateAgentClient
 from config import get_settings
-from db.catalog import all_domains
+from db.catalog import access_for_domain, all_domains
 from db.enums import Priority, RejectionReason, SignalStatus
 from db.models import Signal
 from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.fetcher import SourceUnavailable, fetch
-from parser.filters import is_domain_whitelisted
+from parser.filters import domain_of, is_domain_whitelisted
 
 log = logging.getLogger("bot")
 
@@ -515,6 +515,7 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
     sig_id = data["sig_id"]
     text = (message.text or "").strip()
 
+    autocheck_skipped = False
     if text.lower() == "skip":
         npa_link: str | None = None
     elif not text.startswith("http"):
@@ -529,14 +530,25 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
             return
         # AGENTS.md раздел 10: «бот проверяет доступность страницы» — вне DB-сессии,
         # чтобы не держать транзакцию открытой во время сетевого запроса.
-        try:
-            fetch(text, access="direct")
-        except SourceUnavailable:
-            await message.answer(
-                "Ссылка недоступна. Проверьте её и отправьте ещё раз. Или загрузите файл напрямую."
-            )
-            return
-        npa_link = text
+        access = access_for_domain(domain_of(text))
+        if access == "unsupported":
+            # Домен документирован как недоступный по сети даже через RU-прокси
+            # (docs/SPEC_bot_npa_link_check.md) — принимаем на доверии, без автопроверки.
+            autocheck_skipped = True
+            npa_link = text
+        else:
+            try:
+                fetch(
+                    text,
+                    access=access or "direct",
+                    ru_proxy_url=get_settings().ru_proxy_url if access == "ru_proxy" else None,
+                )
+            except SourceUnavailable:
+                await message.answer(
+                    "Ссылка недоступна. Проверьте её и отправьте ещё раз. Или загрузите файл напрямую."
+                )
+                return
+            npa_link = text
 
     db_factory = get_session_factory()
     with db_factory() as db:
@@ -560,7 +572,13 @@ async def on_npa_link(message: Message, state: FSMContext) -> None:
         _autoupdate_client.send(s.npa_link, s.measure_id)
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
 
-    await message.answer("✅ Ссылка принята. Статус: Передан агенту.")
+    if autocheck_skipped:
+        await message.answer(
+            f"✅ Ссылка принята (домен {domain_of(text)} не поддерживает автопроверку, "
+            "проверьте вручную). Статус: Передан агенту."
+        )
+    else:
+        await message.answer("✅ Ссылка принята. Статус: Передан агенту.")
     await state.clear()
 
 
