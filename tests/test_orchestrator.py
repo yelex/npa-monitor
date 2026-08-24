@@ -8,7 +8,9 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
+from db.enums import RejectionReason, SignalStatus
 from db.models import DocumentSeen, Signal
+from db.service import transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable
@@ -218,6 +220,44 @@ def test_process_source_creates_second_signal_when_llm_unavailable_for_paraphras
     assert result.new_signals == 2
     assert result.duplicates == 0
     assert session.query(Signal).count() == 2
+
+
+def test_process_source_does_not_recreate_signal_for_url_rejected_earlier(
+    session: Session, classifier: Classifier
+) -> None:
+    # PLAN.md Фаза 9 п.3 / docs/SPEC_no_recreate_after_rejection.md: расследование
+    # дампа не нашло реального случая пересоздания сигнала по тому же URL после
+    # отклонения (единственный воспроизводимый механизм — рансующаяся дата в пути
+    # sfr.gov.ru/branches/*/info/, уже закрыт исключением пути целиком, Фаза 9 п.1).
+    # Этот тест фиксирует явным контрактом то, что раньше было верно случайно:
+    # documents_seen не смотрит на Signal.status — отклонённый URL не создаёт новый
+    # сигнал при повторном обходе, не только «просто дубликат».
+    title = "постановление ветеран боевых действий выплата"
+    url = "https://sfr.gov.ru/n/rejected-1"
+    publications = [_pub("sfr.gov.ru/press_center/news", title, url, published_at=NOW)]
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
+
+    first = process_source(session, classifier, spec, now=NOW, llm_client=None)
+    session.commit()
+    assert first.new_signals == 1
+    signal = session.query(Signal).one()
+
+    transition_status(
+        session,
+        signal,
+        SignalStatus.REJECTED,
+        changed_by="expert1",
+        rejection_reason=RejectionReason.NOT_TARGET_CATEGORY,
+    )
+    session.commit()
+
+    second = process_source(session, classifier, spec, now=NOW + dt.timedelta(days=1), llm_client=None)
+    session.commit()
+
+    assert second.new_signals == 0
+    assert second.duplicates == 1
+    assert session.query(Signal).count() == 1  # не пересоздан
+    assert session.query(Signal).one().status == SignalStatus.REJECTED  # статус не тронут
 
 
 def test_process_source_rejects_non_whitelisted_domain(session: Session, classifier: Classifier) -> None:
