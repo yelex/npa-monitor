@@ -46,11 +46,12 @@ other:
     note: обзоры изменений, RSS — проверено вживую
   - domain: docs.cntd.ru
     url: https://docs.cntd.ru/comments
-    access: unsupported
+    access: ru_proxy
     note: >-
-      обзоры изменений — сетевого доступа нет вовсе (таймаут, проверено вживую
-      2026-08-20), известная проблема measure_deepagent: SSO-redirect-loop без cookie
-      jar, нужен RU-прокси с полноценным cookie jar (docs/STAGE0.md раздел 1)
+      обзоры изменений; страницы документов доступны через RU-прокси (проверено
+      вживую 2026-08-25: direct — таймаут, через http://95.142.42.28:8888 — 200
+      за 0.7с; боевой фетч подтверждён npa-somas, E2E sig-106). Часть страниц
+      (comments, SSO) может редирект-лупить — деградация в обычное «недоступно».
   - domain: tass.ru
     url: https://tass.ru/rss/v2.xml
     access: direct
