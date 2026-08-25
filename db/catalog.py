@@ -47,6 +47,7 @@ class RegionEntry:
     code: str
     name: str
     sources: tuple[Source, ...]
+    aliases: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,7 +104,8 @@ def load_regions(path: Path | None = None) -> tuple[RegionEntry, ...]:
             raise CatalogError(f"regions.yaml: дублирующийся code={code!r}")
         seen.add(code)
         sources = tuple(Source(**s) for s in item.get("sources", []))
-        result.append(RegionEntry(code=code, name=item["name"], sources=sources))
+        aliases = tuple(item.get("aliases", []) or [])
+        result.append(RegionEntry(code=code, name=item["name"], sources=sources, aliases=aliases))
     return tuple(result)
 
 

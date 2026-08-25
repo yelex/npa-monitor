@@ -128,6 +128,43 @@ def test_new_region_picked_up_without_code_change(tmp_path: Path) -> None:
     assert [s.domain for s in regions[0].sources] == ["newly-added-source.example.ru"]
 
 
+def test_region_aliases_optional_and_defaults_empty(tmp_path: Path) -> None:
+    """Фаза 14 (docs/SPEC_region_keyboard.md п.2): `aliases` — опциональное поле,
+    записи без него (большинство справочника) получают пустой tuple, не падают."""
+    custom_path = tmp_path / "regions.yaml"
+    custom_path.write_text(
+        textwrap.dedent(
+            """
+            - code: bez-aliasov
+              name: Без алиасов
+              sources: []
+            - code: s-aliasami
+              name: С алиасами
+              aliases: [алиас1, алиас2]
+              sources: []
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    regions = load_regions(custom_path)
+
+    by_code = {r.code: r for r in regions}
+    assert by_code["bez-aliasov"].aliases == ()
+    assert by_code["s-aliasami"].aliases == ("алиас1", "алиас2")
+
+
+def test_default_regions_yaml_has_handful_of_aliases() -> None:
+    """Заполнено вручную для ~10 ходовых аббревиатур (SPEC п.2) — не автогенерируется,
+    но должно реально присутствовать в справочнике, который грузит бот."""
+    regions = load_regions()
+    aliased = {r.code: r.aliases for r in regions if r.aliases}
+
+    assert "khanty-mansiiskii-avtonomnyi-okrug-yugra" in aliased
+    assert "хмао" in aliased["khanty-mansiiskii-avtonomnyi-okrug-yugra"]
+    assert len(aliased) >= 5
+
+
 def test_unknown_life_situation_id_raises_catalog_error(tmp_path: Path) -> None:
     custom_path = tmp_path / "life_situations.yaml"
     custom_path.write_text(

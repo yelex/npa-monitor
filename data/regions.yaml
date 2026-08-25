@@ -13,6 +13,13 @@
 # следующем запуске.
 #
 # access у источников — см. пояснение в data/sources.yaml.
+#
+# aliases (Фаза 14, docs/SPEC_region_keyboard.md п.2) — опциональный список ходовых
+# аббревиатур/сокращений (хмао, спб и т.п.), которые find_region_matches ищет наравне с
+# name/code. Заполнено вручную для ~10 однозначных случаев, не автогенерируется — но
+# записи ниже маркера в остальном генерируются scripts/gen_regions_yaml.py, который
+# затирает секцию целиком: перегенерация справочника унесёт вручную добавленные aliases,
+# их придётся вписать заново.
 
 - code: rf
   name: РФ
@@ -80,6 +87,7 @@
   sources: []
 - code: donetskaya-narodnaya-respublika
   name: Донецкая Народная Республика
+  aliases: [днр]
   sources: []
 - code: evreiskaya-avtonomnaya-oblast
   name: Еврейская автономная область
@@ -98,6 +106,7 @@
   sources: []
 - code: kabardino-balkarskaya-respublika
   name: Кабардино-Балкарская Республика
+  aliases: [кбр]
   sources: []
 - code: kaliningradskaya-oblast
   name: Калининградская область
@@ -110,6 +119,7 @@
   sources: []
 - code: karachaevo-cherkesskaya-respublika
   name: Карачаево-Черкесская Республика
+  aliases: [кчр]
   sources: []
 - code: kemerovskaya-oblast
   name: Кемеровская область
@@ -140,6 +150,7 @@
   sources: []
 - code: luganskaya-narodnaya-respublika
   name: Луганская Народная Республика
+  aliases: [лнр]
   sources: []
 - code: magadanskaya-oblast
   name: Магаданская область
@@ -245,6 +256,7 @@
   sources: []
 - code: sankt-peterburg
   name: Санкт-Петербург
+  aliases: [спб]
   sources: []
 - code: saratovskaya-oblast
   name: Саратовская область
@@ -290,6 +302,7 @@
   sources: []
 - code: khanty-mansiiskii-avtonomnyi-okrug-yugra
   name: Ханты-Мансийский автономный округ - Югра
+  aliases: [хмао, югра]
   sources: []
 - code: chelyabinskaya-oblast
   name: Челябинская область
@@ -302,9 +315,11 @@
   sources: []
 - code: chukotskii-avtonomnyi-okrug
   name: Чукотский автономный округ
+  aliases: [чао]
   sources: []
 - code: yamalo-nenetskii-avtonomnyi-okrug
   name: Ямало-Ненецкий автономный округ
+  aliases: [янао]
   sources: []
 - code: yaroslavskaya-oblast
   name: Ярославская область

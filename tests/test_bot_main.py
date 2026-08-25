@@ -165,6 +165,50 @@ async def _search_region(sig_id: int, state: FakeState, query: str, *, user_id: 
     return message
 
 
+# --- Фаза 14 (docs/SPEC_region_keyboard.md): буквенный навигатор региона, helper'ы ---
+
+
+async def _tap_region_letter(sig_id: int, state: FakeState, letter: str, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"regletter:{sig_id}:{letter}"
+    cb.message.edit_text = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_region_letter(cb, state)
+    return cb
+
+
+async def _tap_region_page(
+    sig_id: int, state: FakeState, letter: str, offset: int, *, user_id: int = 111
+) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"regpage:{sig_id}:{letter}:{offset}"
+    cb.message.edit_reply_markup = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_region_page(cb, state)
+    return cb
+
+
+async def _tap_region_back(sig_id: int, state: FakeState, *, user_id: int = 111) -> MagicMock:
+    cb = MagicMock()
+    cb.from_user.id = user_id
+    cb.data = f"regback:{sig_id}"
+    cb.message.edit_text = AsyncMock()
+    cb.answer = AsyncMock()
+    await bot_main.on_region_back(cb, state)
+    return cb
+
+
+def _many_regions_fixture() -> tuple:
+    """10 фейковых регионов на одну букву «Т» — проверка пагинации по 8 (SPEC п.1),
+    независимо от реального содержимого data/regions.yaml."""
+    return tuple(
+        bot_main.RegionEntry(code=f"t{i}", name=f"Тестовый регион {i:02d}", sources=())
+        for i in range(10)
+    )
+
+
 # --- docs/SPEC_signal_type_measure_select.md: тип сигнала -> выбор меры helper'ы ---
 
 
@@ -840,7 +884,6 @@ async def test_on_region_manual_zero_matches_asks_to_retry(monkeypatch) -> None:
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
-    await _confirm_region(sig_id, state, "other")
 
     message = await _search_region(sig_id, state, "Атлантида")
 
@@ -854,7 +897,6 @@ async def test_on_region_manual_single_match_finishes_flow(monkeypatch) -> None:
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
-    await _confirm_region(sig_id, state, "other")
 
     await _search_region(sig_id, state, "Москва")
     await _choose_signal_type(sig_id, state, "new")
@@ -871,7 +913,6 @@ async def test_on_region_manual_multiple_matches_asks_to_narrow(monkeypatch) -> 
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
-    await _confirm_region(sig_id, state, "other")
 
     message = await _search_region(sig_id, state, "моск")
 
@@ -879,6 +920,128 @@ async def test_on_region_manual_multiple_matches_asks_to_narrow(monkeypatch) -> 
     assert "Москва" in message.answer.await_args.args[0]
     assert "Московская область" in message.answer.await_args.args[0]
     assert _get_status(sig_id) == SignalStatus.IN_PROGRESS
+
+
+# --- Фаза 14 (docs/SPEC_region_keyboard.md): буквенный навигатор региона ---
+
+
+def test_region_kb_has_no_other_button() -> None:
+    kb = bot_main.region_kb(1)
+    texts = [btn.text for row in kb.inline_keyboard for btn in row]
+    assert "Другое" not in texts
+
+
+def test_region_kb_letters_are_only_ones_present_in_catalog() -> None:
+    """SPEC п.1: буквы — только те, для которых реально есть регион в справочнике,
+    не хардкод алфавита."""
+    kb = bot_main.region_kb(1)
+    letter_buttons = [btn.text for row in kb.inline_keyboard[1:] for btn in row]
+
+    assert letter_buttons == bot_main.region_letters()
+    for letter in letter_buttons:
+        assert bot_main._regions_by_letter(letter)
+
+
+def test_region_letter_kb_paginates_by_8(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _many_regions_fixture)
+
+    page0 = bot_main.region_letter_kb(1, "Т", 0)
+    assert len(page0.inline_keyboard) == 9  # 8 регионов + строка навигации
+    nav0 = [btn.text for btn in page0.inline_keyboard[-1]]
+    assert "Ещё 8" in nav0
+    assert "⬅ Назад к буквам" in nav0
+    assert page0.inline_keyboard[0][0].text == "Тестовый регион 00"
+
+    page1 = bot_main.region_letter_kb(1, "Т", 8)
+    assert len(page1.inline_keyboard) == 3  # 2 оставшихся региона + навигация
+    nav1 = [btn.text for btn in page1.inline_keyboard[-1]]
+    assert "Ещё 8" not in nav1
+    assert "⬅ Назад к буквам" in nav1
+    assert page1.inline_keyboard[0][0].text == "Тестовый регион 08"
+
+
+async def test_on_region_letter_shows_first_page(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _many_regions_fixture)
+
+    cb = await _tap_region_letter(1, FakeState(), "Т")
+
+    cb.message.edit_text.assert_awaited_once()
+    text, kwargs = cb.message.edit_text.await_args.args, cb.message.edit_text.await_args.kwargs
+    assert "Т" in text[0]
+    assert kwargs["reply_markup"].inline_keyboard[0][0].text == "Тестовый регион 00"
+
+
+async def test_on_region_page_advances_offset(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _many_regions_fixture)
+
+    cb = await _tap_region_page(1, FakeState(), "Т", 8)
+
+    cb.message.edit_reply_markup.assert_awaited_once()
+    kb = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+    assert kb.inline_keyboard[0][0].text == "Тестовый регион 08"
+
+
+async def test_region_back_button_returns_to_letters(monkeypatch) -> None:
+    monkeypatch.setattr(bot_main, "load_regions", _many_regions_fixture)
+
+    cb = await _tap_region_back(1, FakeState())
+
+    cb.message.edit_text.assert_awaited_once()
+    text, kwargs = cb.message.edit_text.await_args.args, cb.message.edit_text.await_args.kwargs
+    assert "регион" in text[0].lower()
+    letter_buttons = [btn.text for row in kwargs["reply_markup"].inline_keyboard[1:] for btn in row]
+    assert letter_buttons == ["Т"]
+
+
+async def test_region_selected_from_letter_list_reaches_signal_type(monkeypatch) -> None:
+    """SPEC п.1: выбор региона из списка по букве -> `_advance_to_signal_type`, как при
+    единственном совпадении текстового поиска — тот же `reg:{sig_id}:{code}` callback."""
+    monkeypatch.setattr(bot_main, "load_regions", _many_regions_fixture)
+    sig_id = _make_in_progress_signal()
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _tap_region_letter(sig_id, state, "Т")
+
+    await _confirm_region(sig_id, state, "t3")
+
+    assert state.current_state == bot_main.NpaFlow.ask_signal_type
+    data = await state.get_data()
+    assert data["region"] == "t3"
+
+
+def test_region_callback_data_within_telegram_limit() -> None:
+    """SPEC: callback_data-лимит Telegram — 64 байта; проверяем самые длинные code/буквы
+    из реального `data/regions.yaml` с щедрым sig_id (7 цифр)."""
+    for r in bot_main.load_regions():
+        assert len(f"reg:9999999:{r.code}".encode("utf-8")) <= 64
+    for letter in bot_main.region_letters():
+        assert len(f"regletter:9999999:{letter}".encode("utf-8")) <= 64
+        assert len(f"regpage:9999999:{letter}:800".encode("utf-8")) <= 64
+
+
+def test_find_region_matches_alias_finds_hmao() -> None:
+    """SPEC п.2: «хмао» находит ХМАО-Югру через `RegionEntry.aliases`, не только
+    полное имя из справочника."""
+    matches = bot_main.find_region_matches("хмао")
+    assert [r.code for r in matches] == ["khanty-mansiiskii-avtonomnyi-okrug-yugra"]
+
+
+async def test_on_region_manual_alias_finishes_flow() -> None:
+    """Алиас как текстовый fallback-ввод (не только для будущей саджест-логики) —
+    единственное совпадение сразу продвигает флоу, как обычное имя региона."""
+    sig_id = _make_in_progress_signal()
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+
+    await _search_region(sig_id, state, "хмао")
+    await _choose_signal_type(sig_id, state, "new")
+
+    assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        assert session.get(bot_main.Signal, sig_id).region == "khanty-mansiiskii-avtonomnyi-okrug-yugra"
 
 
 # --- аудит расхождения классификатора с подтверждением аналитика (StatusHistory.reason) ---

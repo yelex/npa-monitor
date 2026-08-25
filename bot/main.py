@@ -213,16 +213,82 @@ def category_toggle_kb(sig_id: int, selected: set[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+REGION_LETTER_ROW_SIZE = 8
+REGION_PAGE_SIZE = 8
+
+
+def region_letters() -> list[str]:
+    """SPEC_region_keyboard.md п.1: буквы, реально встречающиеся как первая буква
+    `name` в справочнике (кроме rf/moscow/undefined) — не хардкод алфавита, иначе
+    навигатор предлагал бы буквы без единого региона за ними."""
+    regions = load_regions()
+    letters = {
+        r.name[0].upper()
+        for r in regions
+        if r.code not in (REGION_RF, REGION_MOSCOW, REGION_UNDEFINED)
+    }
+    return sorted(letters)
+
+
+def _regions_by_letter(letter: str) -> list[RegionEntry]:
+    return sorted(
+        (
+            r
+            for r in load_regions()
+            if r.code not in (REGION_RF, REGION_MOSCOW, REGION_UNDEFINED)
+            and r.name[0].upper() == letter
+        ),
+        key=lambda r: r.name,
+    )
+
+
+def _region_button_label(entry: RegionEntry) -> str:
+    return entry.name if len(entry.name) <= 40 else entry.name[:37] + "..."
+
+
 def region_kb(sig_id: int) -> InlineKeyboardMarkup:
-    """SPEC п.3: кнопки РФ/Москва/Не определён + «Другое» (свободный текст, обрабатывает
-    `on_region_manual`)."""
+    """SPEC_region_keyboard.md п.1/3: кнопки РФ/Москва/Не определён (быстрый путь) +
+    буквенный навигатор (2-3 ряда) вместо «Другое» — тап на букву открывает список
+    регионов (`on_region_letter` -> `region_letter_kb`). Текстовый ввод в состоянии
+    `ask_region` остаётся рабочим fallback'ом (`on_region_manual`), просто без кнопки."""
+    letters = region_letters()
+    letter_rows = [
+        [
+            InlineKeyboardButton(text=letter, callback_data=f"regletter:{sig_id}:{letter}")
+            for letter in letters[i:i + REGION_LETTER_ROW_SIZE]
+        ]
+        for i in range(0, len(letters), REGION_LETTER_ROW_SIZE)
+    ]
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=region_label(code), callback_data=f"reg:{sig_id}:{code}")
             for code in REGION_QUICK_CODES
         ],
-        [InlineKeyboardButton(text="Другое", callback_data=f"reg:{sig_id}:other")],
+        *letter_rows,
     ])
+
+
+def region_letter_kb(sig_id: int, letter: str, offset: int) -> InlineKeyboardMarkup:
+    """Список регионов на `letter`, пагинация по `REGION_PAGE_SIZE` (по образцу
+    `measure_kb`) + «Назад к буквам». Выбор региона — тот же `reg:{sig_id}:{code}`, что
+    и быстрые кнопки (`on_region_button`): `RegionEntry.code` даже у самых длинных
+    записей укладывается в лимит `callback_data` 64 байта вместе с префиксом/sig_id."""
+    candidates = _regions_by_letter(letter)
+    page_items = candidates[offset:offset + REGION_PAGE_SIZE]
+    rows = [
+        [InlineKeyboardButton(text=_region_button_label(r), callback_data=f"reg:{sig_id}:{r.code}")]
+        for r in page_items
+    ]
+    nav_row = []
+    if offset + REGION_PAGE_SIZE < len(candidates):
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Ещё 8", callback_data=f"regpage:{sig_id}:{letter}:{offset + REGION_PAGE_SIZE}"
+            )
+        )
+    nav_row.append(InlineKeyboardButton(text="⬅ Назад к буквам", callback_data=f"regback:{sig_id}"))
+    rows.append(nav_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # --- SPEC_signal_type_measure_select.md: тип сигнала + выбор меры из базы --------
@@ -792,12 +858,22 @@ def find_region_matches(query: str) -> list[RegionEntry]:
     у большинства областей общая лемма «область», и «в Волгоградской области» матчился
     бы на все ~40 областей сразу — покрывает падежные формы («Татарстане», «в
     Волгоградской области»), оставаясь точным. Новый регион на лету не создаём —
-    источник истины справочник `data/regions.yaml`."""
+    источник истины справочник `data/regions.yaml`.
+
+    Фаза 14 (SPEC_region_keyboard.md п.2): ступень 1 дополнительно ищет по
+    `RegionEntry.aliases` (ходовые аббревиатуры вроде «хмао», «спб») — тем же
+    casefold-подстрочным сравнением, что и name/code."""
     q = query.strip().casefold()
     if not q:
         return []
     regions = load_regions()
-    substring_matches = [r for r in regions if q in r.name.casefold() or q in r.code.casefold()]
+    substring_matches = [
+        r
+        for r in regions
+        if q in r.name.casefold()
+        or q in r.code.casefold()
+        or any(q in alias.casefold() for alias in r.aliases)
+    ]
     if substring_matches:
         return substring_matches
 
@@ -912,18 +988,57 @@ async def _advance_to_signal_type(target: Message, state: FSMContext, sig_id: in
 
 @router.callback_query(F.data.startswith("reg:"))
 async def on_region_button(cb: CallbackQuery, state: FSMContext) -> None:
-    """SPEC п.3: РФ/Москва/Не определён — переход к шагу типа сигнала; «Другое» —
-    просит текст, обрабатывает `on_region_manual` в том же состоянии `ask_region`."""
+    """SPEC_region_keyboard.md: `reg:{sig_id}:{code}` — код региона, будь то сентинел
+    (rf/moscow/undefined, быстрые кнопки) или `RegionEntry.code` из справочника,
+    выбранный через буквенный навигатор (`region_letter_kb`) — в обоих случаях сразу
+    переход к шагу типа сигнала."""
     if not is_allowed(cb.from_user.id):
         await cb.answer("Нет доступа", show_alert=True)
         return
     _, sig_id_s, code = cb.data.split(":")
     sig_id = int(sig_id_s)
-    if code == "other":
-        await cb.message.answer("Введите название региона (или часть) текстом.")  # type: ignore[union-attr]
-        await cb.answer()
-        return
     await _advance_to_signal_type(cb.message, state, sig_id, code)  # type: ignore[arg-type]
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("regletter:"))
+async def on_region_letter(cb: CallbackQuery, state: FSMContext) -> None:
+    """Тап по букве навигатора — список регионов на эту букву, страница 0."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, letter = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    await cb.message.edit_text(  # type: ignore[union-attr]
+        f"Регионы на «{letter}»:", reply_markup=region_letter_kb(sig_id, letter, 0)
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("regpage:"))
+async def on_region_page(cb: CallbackQuery, state: FSMContext) -> None:
+    """«Ещё 8» внутри списка регионов на одну букву — следующая страница."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s, letter, offset_s = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    offset = int(offset_s)
+    await cb.message.edit_reply_markup(  # type: ignore[union-attr]
+        reply_markup=region_letter_kb(sig_id, letter, offset)
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("regback:"))
+async def on_region_back(cb: CallbackQuery, state: FSMContext) -> None:
+    """«⬅ Назад к буквам» — возврат к верхней клавиатуре шага региона."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, sig_id_s = cb.data.split(":")
+    sig_id = int(sig_id_s)
+    await cb.message.edit_text("Выберите регион:", reply_markup=region_kb(sig_id))  # type: ignore[union-attr]
     await cb.answer()
 
 
