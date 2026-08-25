@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from db.enums import Region, SignalCategory
-from db.measures import build_pool, cosine, lemmatized_bow, load_records, rank, score
+from db.catalog import load_regions
+from db.enums import REGION_MOSCOW, REGION_RF, REGION_UNDEFINED, SignalCategory
+from db.measures import (
+    _matches_region,
+    _region_name,
+    build_pool,
+    cosine,
+    lemmatized_bow,
+    load_records,
+    rank,
+    score,
+)
+
+_KB_PATH = Path(__file__).resolve().parent.parent / "data" / "benefits_knowledge_base.json"
 
 _ROWS = [
     {
@@ -81,33 +94,33 @@ def test_load_records_excludes_null_measure_id(kb_path) -> None:
 
 
 def test_build_pool_filters_by_category_source_dataset(kb_path) -> None:
-    svo_pool = build_pool([SignalCategory.SVO], Region.UNDEFINED, path=kb_path)
+    svo_pool = build_pool([SignalCategory.SVO], REGION_UNDEFINED, path=kb_path)
     assert {r.measure_id for r in svo_pool} == {"00_svo_1", "77_svo_2"}
 
-    veterans_pool = build_pool([SignalCategory.VETERANS], Region.UNDEFINED, path=kb_path)
+    veterans_pool = build_pool([SignalCategory.VETERANS], REGION_UNDEFINED, path=kb_path)
     assert {r.measure_id for r in veterans_pool} == {"00_vbd_1"}
 
-    disabled_pool = build_pool([SignalCategory.DISABLED], Region.UNDEFINED, path=kb_path)
+    disabled_pool = build_pool([SignalCategory.DISABLED], REGION_UNDEFINED, path=kb_path)
     assert {r.measure_id for r in disabled_pool} == {"00_inv_1"}
 
 
 def test_build_pool_unions_multiple_categories(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO, SignalCategory.DISABLED], Region.UNDEFINED, path=kb_path)
+    pool = build_pool([SignalCategory.SVO, SignalCategory.DISABLED], REGION_UNDEFINED, path=kb_path)
     assert {r.measure_id for r in pool} == {"00_svo_1", "77_svo_2", "00_inv_1"}
 
 
 def test_build_pool_filters_by_region_moscow(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO], Region.MOSCOW, path=kb_path)
+    pool = build_pool([SignalCategory.SVO], REGION_MOSCOW, path=kb_path)
     assert {r.measure_id for r in pool} == {"77_svo_2"}
 
 
 def test_build_pool_filters_by_region_rf(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO], Region.RF, path=kb_path)
+    pool = build_pool([SignalCategory.SVO], REGION_RF, path=kb_path)
     assert {r.measure_id for r in pool} == {"00_svo_1"}
 
 
 def test_build_pool_undefined_region_returns_all_regions(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO], Region.UNDEFINED, path=kb_path)
+    pool = build_pool([SignalCategory.SVO], REGION_UNDEFINED, path=kb_path)
     assert {r.measure_id for r in pool} == {"00_svo_1", "77_svo_2"}
 
 
@@ -133,7 +146,7 @@ def test_lemmatized_bow_normalizes_word_forms() -> None:
 
 
 def test_score_substring_boosts_exact_name_match(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO], Region.UNDEFINED, path=kb_path)
+    pool = build_pool([SignalCategory.SVO], REGION_UNDEFINED, path=kb_path)
     record = next(r for r in pool if r.measure_id == "00_svo_1")
     with_substring = score("выплата при заключении контракта", record)
     without_substring = score("совершенно не совпадающий запрос", record)
@@ -142,7 +155,7 @@ def test_score_substring_boosts_exact_name_match(kb_path) -> None:
 
 
 def test_rank_orders_by_descending_score(kb_path) -> None:
-    pool = build_pool([SignalCategory.SVO], Region.UNDEFINED, path=kb_path)
+    pool = build_pool([SignalCategory.SVO], REGION_UNDEFINED, path=kb_path)
     ranked = rank("выплата контракт военная служба", pool)
     scores = [s for _r, s in ranked]
     assert scores == sorted(scores, reverse=True)
@@ -152,6 +165,48 @@ def test_rank_orders_by_descending_score(kb_path) -> None:
 
 
 def test_rank_returns_empty_for_empty_pool(kb_path) -> None:
-    pool = build_pool([SignalCategory.VETERANS], Region.MOSCOW, path=kb_path)
+    pool = build_pool([SignalCategory.VETERANS], REGION_MOSCOW, path=kb_path)
     assert pool == []
     assert rank("любой запрос", pool) == []
+
+
+def test_region_name_resolves_via_catalog() -> None:
+    """Фаза 13: `_region_name` берёт имя региона через `catalog.load_regions()` по коду
+    — не захардкоженный словарь (SPEC_region_expansion.md раздел «Решение» п.4)."""
+    assert _region_name(REGION_MOSCOW) == "Москва"
+    assert _region_name(REGION_RF) == "РФ"
+    assert _region_name("volgogradskaya-oblast") == "Волгоградская область"
+
+
+def test_region_name_undefined_is_none_special_case() -> None:
+    """undefined — спецкейс «без фильтра», в базе мер такого региона нет (раздел
+    «НЕ входит»), а не код для поиска по catalog."""
+    assert _region_name(REGION_UNDEFINED) is None
+
+
+def test_matches_region_wanted_none_accepts_any_record(kb_path) -> None:
+    """`wanted=None` — веха вызывающего кода "без фильтра" (undefined или неизвестный
+    код, см. `_region_name`), а не свойство конкретной записи — годится любая запись."""
+    any_record = load_records(kb_path)[0]
+    assert _matches_region(any_record, None) is True
+
+
+def test_matches_region_filters_by_resolved_name(kb_path) -> None:
+    record_moscow = next(r for r in load_records(kb_path) if r.measure_id == "77_svo_2")
+    record_rf = next(r for r in load_records(kb_path) if r.measure_id == "00_svo_1")
+
+    assert _matches_region(record_moscow, "Москва") is True
+    assert _matches_region(record_rf, "Москва") is False
+
+
+def test_all_kb_regions_have_regions_yaml_entry() -> None:
+    """Guard-тест Фазы 13 (docs/SPEC_region_expansion.md, раздел «Решение» п.4): каждое
+    уникальное значение region снапшота базы мер должно иметь запись в data/regions.yaml
+    (по имени) — ловит рассинхрон, если база обновится новым регионом без обновления
+    справочника (scripts/gen_regions_yaml.py не был перезапущен)."""
+    raw = json.loads(_KB_PATH.read_text(encoding="utf-8"))
+    kb_region_names = {row["region"] for row in raw if row.get("region")}
+    yaml_region_names = {r.name for r in load_regions()}
+
+    missing = kb_region_names - yaml_region_names
+    assert not missing, f"регионы базы мер без записи в data/regions.yaml: {sorted(missing)}"

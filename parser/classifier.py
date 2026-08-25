@@ -44,7 +44,7 @@ from db.catalog import (
     load_regions,
     load_sources,
 )
-from db.enums import EventType, Priority, Region, SignalCategory
+from db.enums import REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory
 from parser.filters import domain_of
 from parser.models import Publication
 from parser.ru_stem import contains_keyword, find_matches
@@ -64,7 +64,7 @@ class ClassificationResult:
     is_relevant: bool
     categories: tuple[SignalCategory, ...]
     event_type: EventType
-    region: Region
+    region: str
     priority: Priority
 
 
@@ -106,7 +106,7 @@ class ClassificationTrace:
 
         lines.append(
             f"тип события: {self.result.event_type.value}; "
-            f"регион: {self.result.region.value}; приоритет: {self.result.priority.value}"
+            f"регион: {self.result.region}; приоритет: {self.result.priority.value}"
         )
         return " | ".join(lines)
 
@@ -141,7 +141,7 @@ def detect_event_type(text: str, keywords: ClassificationKeywords) -> EventType:
 
 def detect_region(
     publication: Publication, regions: tuple[RegionEntry, ...], federal_domains: frozenset[str]
-) -> Region:
+) -> str:
     """AGENTS.md раздел 4.1: домен источника → «РФ» для федеральных → «Не определён».
 
     Домен берётся из `publication.url` (`parser/filters.py::domain_of`), не из
@@ -155,28 +155,30 @@ def detect_region(
     домена, для которого регион должен определяться как «РФ».
 
     Текстовое уточнение (раздел 4.1: «регион может уточняться по тексту публикации») не
-    реализовано: пока в справочнике всего 2 региона (Москва + РФ, AGENTS.md раздел 1),
-    домен однозначно определяет регион без разбора текста — добавить при расширении за
-    пределы MVP (AGENTS.md раздел 16, пункт 12).
+    реализовано: справочник (Фаза 13, docs/SPEC_region_expansion.md) покрывает все 89
+    регионов, но источники (`sources`) заполнены только для Москвы и РФ (парсер
+    остальные 87 не обходит — основной канал их обнаружения Yandex Search, AGENTS.md
+    раздел 16 п.14), поэтому для этого пути домен однозначно определяет только «Москва»/
+    «РФ»/«Не определён», как и раньше.
     """
     host = domain_of(publication.url)
     for region_entry in regions:
         if any(
             host == source.domain or host.endswith(f".{source.domain}") for source in region_entry.sources
         ):
-            return region_entry.region
+            return region_entry.code
     if any(host == domain or host.endswith(f".{domain}") for domain in federal_domains):
-        return Region.RF
-    return Region.UNDEFINED
+        return REGION_RF
+    return REGION_UNDEFINED
 
 
-def detect_priority(text: str, keywords: ClassificationKeywords, region: Region) -> Priority:
+def detect_priority(text: str, keywords: ClassificationKeywords, region: str) -> Priority:
     text_lower = text.lower()
     has_document_marker = _contains_any(text_lower, keywords.document_markers)
     has_priority_word = _contains_any(text_lower, keywords.priority_high_words)
     if not has_document_marker and not has_priority_word:
         return Priority.LOW
-    if region == Region.UNDEFINED:
+    if region == REGION_UNDEFINED:
         return Priority.MEDIUM
     if has_document_marker and has_priority_word:
         return Priority.HIGH

@@ -7,7 +7,7 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, SignalCategory, SignalStatus
+from db.enums import REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory, SignalStatus
 from db.models import Signal
 from db.service import create_signal, transition_status
 from db.session import init_db, make_engine, make_session_factory
@@ -37,7 +37,7 @@ def _make_signal(
     title: str,
     source_url: str,
     priority: Priority = Priority.MEDIUM,
-    region: Region = Region.RF,
+    region: str = REGION_RF,
     status: SignalStatus = SignalStatus.NEW,
     created_at: dt.datetime = NOW,
 ) -> Signal:
@@ -142,7 +142,7 @@ def test_step_c_raises_stale_low_priority(session: Session, classifier: Classifi
         title="Евгений Солнцев: в Оренбуржье ввели новую меру поддержки участникам СВО",
         source_url="https://rg.ru/2026/08/10/x.html",
         priority=Priority.LOW,
-        region=Region.UNDEFINED,
+        region=REGION_UNDEFINED,
     )
 
     report = run_cleanup(session, classifier, apply=True)
@@ -162,7 +162,7 @@ def test_step_c_no_change_when_priority_already_matches(session: Session, classi
         title="постановление ветеран боевых действий выплата новый",
         source_url="https://kremlin.ru/acts/1",
         priority=Priority.HIGH,
-        region=Region.RF,
+        region=REGION_RF,
     )
 
     report = run_cleanup(session, classifier, apply=True)

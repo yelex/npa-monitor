@@ -7,7 +7,7 @@ import json
 import pytest
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, SignalCategory
+from db.enums import REGION_MOSCOW, EventType, Priority, SignalCategory
 from db.models import Signal
 from db.service import create_signal
 from db.session import init_db, make_engine, make_session_factory
@@ -59,7 +59,7 @@ def _make_signal(
     *,
     title: str,
     priority: Priority,
-    region: Region = Region.MOSCOW,
+    region: str = REGION_MOSCOW,
     categories: tuple[SignalCategory, ...] = (SignalCategory.VETERANS,),
     event_type: EventType = EventType.AMENDMENT,
 ) -> Signal:

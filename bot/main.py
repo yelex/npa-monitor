@@ -29,8 +29,17 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from bot.autoupdate_client import AutoUpdateAgentClient, archive_result, list_pending_results, task_path
 from config import get_settings
 from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
-from db.enums import Priority, Region, RejectionReason, SignalCategory, SignalStatus, SignalType
-from db.measures import MeasureRecord, build_pool
+from db.enums import (
+    REGION_MOSCOW,
+    REGION_RF,
+    REGION_UNDEFINED,
+    Priority,
+    RejectionReason,
+    SignalCategory,
+    SignalStatus,
+    SignalType,
+)
+from db.measures import MeasureRecord, build_pool, lemmatized_bow
 from db.measures import rank as rank_measures
 from db.models import Signal, SignalCategoryLink, StatusHistory
 from db.service import InvalidStatusTransition, transition_status
@@ -76,7 +85,7 @@ EVENT_LABELS = {
 }
 PRIORITY_LABELS = {Priority.HIGH: "🔴 Высокий", Priority.MEDIUM: "🟡 Средний", Priority.LOW: "🟢 Низкий"}
 PRIORITY_ORDER = {Priority.HIGH: 0, Priority.MEDIUM: 1, Priority.LOW: 2}
-REGION_LABELS = {"rf": "РФ", "moscow": "Москва", "undefined": "Не определён"}
+REGION_QUICK_CODES = (REGION_RF, REGION_MOSCOW, REGION_UNDEFINED)
 REJECT_REASONS = {
     "r_not_target": "Не относится к целевым категориям",
     "r_dup": "Дубликат",
@@ -109,6 +118,17 @@ def is_allowed(user_id: int) -> bool:
 # --- Rendering ---------------------------------------------------------------
 
 
+def region_label(code: str | None) -> str:
+    """Фаза 13 (docs/SPEC_region_expansion.md, раздел «Бот»): регион отображается именем
+    из справочника `data/regions.yaml`, не хардкод-словарём — покрывает все 89 регионов
+    + rf/moscow/undefined одинаково. Неизвестный код (рассинхрон) — показываем как есть,
+    не роняем рендер карточки."""
+    if not code:
+        return "—"
+    entry = next((r for r in load_regions() if r.code == code), None)
+    return entry.name if entry else code
+
+
 def signal_card(s: Signal, categories: list[str]) -> str:
     """Заголовок и ссылка — из реального веб-контента (листинги, Yandex Search), не
     контролируются нами: экранируем через `html.escape` перед вставкой в HTML-разметку
@@ -123,7 +143,7 @@ def signal_card(s: Signal, categories: list[str]) -> str:
         f"<b>{title}</b>",
         f"ЖС: {cats}",
         f"Тип: {EVENT_LABELS.get(s.event_type.value if s.event_type else '', s.event_type or '—')}",
-        f"Регион: {REGION_LABELS.get(s.region.value if s.region else '', s.region or '—')}",
+        f"Регион: {region_label(s.region)}",
         f"Статус: {STATUS_LABELS.get(s.status, s.status)}",
         f"Дата: {s.created_at:%d.%m.%Y %H:%M}",
         f"🔗 {source_url}" if source_url else "",
@@ -151,7 +171,7 @@ def sent_signal_card(s: Signal, categories: list[str], transition: StatusHistory
         f"🆔 <b>{s.id}</b> · {STATUS_LABELS.get(s.status, s.status)}",
         f"<b>{title}</b>",
         f"ЖС: {cats}",
-        f"Регион: {REGION_LABELS.get(s.region.value if s.region else '', s.region or '—')}",
+        f"Регион: {region_label(s.region)}",
         f"Ссылка на НПА: {npa_link}",
     ]
     if transition is not None:
@@ -198,8 +218,8 @@ def region_kb(sig_id: int) -> InlineKeyboardMarkup:
     `on_region_manual`)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=REGION_LABELS[code], callback_data=f"reg:{sig_id}:{code}")
-            for code in ("rf", "moscow", "undefined")
+            InlineKeyboardButton(text=region_label(code), callback_data=f"reg:{sig_id}:{code}")
+            for code in REGION_QUICK_CODES
         ],
         [InlineKeyboardButton(text="Другое", callback_data=f"reg:{sig_id}:other")],
     ])
@@ -753,17 +773,42 @@ async def on_category_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
+# Предлоги, которые аналитик естественно вставляет («в Волгоградской области»), но
+# которые не несут региональной специфики — без фильтра лемма «в»/«по»/… не встречается
+# ни в одном RegionEntry.name, и требование "подмножества" (см. find_region_matches)
+# просто не давало бы ни одного совпадения.
+_REGION_QUERY_STOPWORDS = frozenset(
+    {"в", "во", "на", "по", "для", "от", "до", "из", "к", "у", "с", "со", "о", "об", "при"}
+)
+
+
 def find_region_matches(query: str) -> list[RegionEntry]:
-    """SPEC п.3: поиск по `db.catalog.load_regions()` (casefold, подстрока по name/code).
-    Новый `Region` на лету не создаём — источник истины справочник `data/regions.yaml`."""
+    """Фаза 13 (SPEC_region_expansion.md п.3): двухступенчатый матчинг по
+    `db.catalog.load_regions()`. Ступень 1 (быстрый путь) — casefold-подстрока по
+    name/code, как раньше. Ступень 2 — только если ступень 1 не дала ни одного
+    совпадения: лемматизация запроса и токенов `name` через pymorphy3 (паттерн
+    `db.measures.lemmatized_bow`), регион подходит, если множество лемм его name —
+    надмножество лемм запроса (без предлогов). Просто пересечение здесь слишком широкое:
+    у большинства областей общая лемма «область», и «в Волгоградской области» матчился
+    бы на все ~40 областей сразу — покрывает падежные формы («Татарстане», «в
+    Волгоградской области»), оставаясь точным. Новый регион на лету не создаём —
+    источник истины справочник `data/regions.yaml`."""
     q = query.strip().casefold()
     if not q:
         return []
-    return [r for r in load_regions() if q in r.name.casefold() or q in r.code.casefold()]
+    regions = load_regions()
+    substring_matches = [r for r in regions if q in r.name.casefold() or q in r.code.casefold()]
+    if substring_matches:
+        return substring_matches
+
+    query_lemmas = set(lemmatized_bow(query)) - _REGION_QUERY_STOPWORDS
+    if not query_lemmas:
+        return []
+    return [r for r in regions if query_lemmas <= set(lemmatized_bow(r.name))]
 
 
 def _audit_reason(
-    old_categories: list[str], old_region: Region, new_categories: list[str], new_region: Region
+    old_categories: list[str], old_region: str, new_categories: list[str], new_region: str
 ) -> str | None:
     """SPEC п.5/решение 5: расхождение классификатора с подтверждением аналитика —
     в `StatusHistory.reason`, grep-able формат `classifier=... region=... -> confirmed=...`.
@@ -771,13 +816,13 @@ def _audit_reason(
     if sorted(old_categories) == sorted(new_categories) and old_region == new_region:
         return None
     return (
-        f"classifier={','.join(sorted(old_categories)) or 'none'} region={old_region.value} -> "
-        f"confirmed={','.join(sorted(new_categories)) or 'none'} region={new_region.value}"
+        f"classifier={','.join(sorted(old_categories)) or 'none'} region={old_region} -> "
+        f"confirmed={','.join(sorted(new_categories)) or 'none'} region={new_region}"
     )
 
 
 async def _finish_npa_flow(
-    target: Message, state: FSMContext, sig_id: int, region: Region, *, changed_by: int
+    target: Message, state: FSMContext, sig_id: int, region: str, *, changed_by: int
 ) -> None:
     """Финальный шаг флоу (SPEC_signal_type_measure_select.md: вызывается теперь из
     конца шага выбора меры, не из региона): одна DB-сессия — npa_link, перезапись
@@ -827,7 +872,7 @@ async def _finish_npa_flow(
 
         try:
             _autoupdate_client.send(
-                s, s.npa_link, s.source_url, categories, region.value,
+                s, s.npa_link, s.source_url, categories, region,
                 signal_type=signal_type.value, measure_id=measure_id, measure_row_hash=measure_row_hash,
             )
         except Exception:  # noqa: BLE001
@@ -856,11 +901,11 @@ async def _finish_npa_flow(
     await state.clear()
 
 
-async def _advance_to_signal_type(target: Message, state: FSMContext, sig_id: int, region: Region) -> None:
+async def _advance_to_signal_type(target: Message, state: FSMContext, sig_id: int, region: str) -> None:
     """SPEC_signal_type_measure_select.md: после подтверждения региона — шаг «тип
     сигнала», не финал флоу. Регион сохраняется в FSM state (нужен в конце цепочки,
     в `_finish_npa_flow`, которая теперь вызывается из `on_signal_type`/`on_measure_button`)."""
-    await state.update_data(region=region.value)
+    await state.update_data(region=region)
     await state.set_state(NpaFlow.ask_signal_type)
     await target.answer("Регион подтверждён. Тип сигнала:", reply_markup=signal_type_kb(sig_id))
 
@@ -878,7 +923,7 @@ async def on_region_button(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.answer("Введите название региона (или часть) текстом.")  # type: ignore[union-attr]
         await cb.answer()
         return
-    await _advance_to_signal_type(cb.message, state, sig_id, Region(code))  # type: ignore[arg-type]
+    await _advance_to_signal_type(cb.message, state, sig_id, code)  # type: ignore[arg-type]
     await cb.answer()
 
 
@@ -904,7 +949,7 @@ async def on_region_manual(message: Message, state: FSMContext) -> None:
         await message.answer(f"Найдено несколько регионов, уточните запрос:\n{listing}")
         return
 
-    await _advance_to_signal_type(message, state, sig_id, matches[0].region)
+    await _advance_to_signal_type(message, state, sig_id, matches[0].code)
 
 
 # --- FSM: тип сигнала -> выбор меры (SPEC_signal_type_measure_select.md) ---------
@@ -920,7 +965,7 @@ async def on_signal_type(cb: CallbackQuery, state: FSMContext) -> None:
     _, sig_id_s, code = cb.data.split(":")
     sig_id = int(sig_id_s)
     data = await state.get_data()
-    region = Region(data["region"])
+    region = data["region"]
 
     if code == "new":
         await state.update_data(signal_type=SignalType.NEW.value, measure_id=None, measure_row_hash=None)
@@ -955,7 +1000,7 @@ async def on_measure_query(message: Message, state: FSMContext) -> None:
         return
 
     categories = [SignalCategory(c) for c in data.get("categories", [])]
-    region = Region(data["region"])
+    region = data["region"]
     pool = build_pool(categories, region, path=get_settings().benefits_knowledge_base_path)
     ranked = rank_measures(query, pool)
     candidates = [
@@ -986,7 +1031,7 @@ async def on_measure_button(cb: CallbackQuery, state: FSMContext) -> None:
     _, sig_id_s, token = cb.data.split(":")
     sig_id = int(sig_id_s)
     data = await state.get_data()
-    region = Region(data["region"])
+    region = data["region"]
 
     if token == "manual":
         await cb.message.answer("Введите текст для поиска меры.")  # type: ignore[union-attr]
@@ -1133,7 +1178,7 @@ def _reconcile_spool_tasks(db: Session, client: AutoUpdateAgentClient) -> int:
                 "measure_id не восстановлен"
             )
         client.send(
-            s, s.npa_link, s.source_url, cats, s.region.value,
+            s, s.npa_link, s.source_url, cats, s.region,
             signal_type=signal_type, measure_id=s.measure_id, measure_row_hash=s.measure_row_hash,
             comment=comment,
         )

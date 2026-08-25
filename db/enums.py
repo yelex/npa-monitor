@@ -50,12 +50,14 @@ class RejectionReason(str, enum.Enum):
     OTHER = "other"  # Другое
 
 
-class Region(str, enum.Enum):
-    """Регион действия, AGENTS.md раздел 7 (MVP: Москва + РФ)."""
-
-    RF = "rf"  # РФ (федеральный уровень)
-    MOSCOW = "moscow"  # Москва (77) — MVP
-    UNDEFINED = "undefined"  # Не определён
+#: Регион действия, AGENTS.md раздел 7. `Signal.region`/`RegionEntry.code` — строка,
+#: источник истины `data/regions.yaml` (Фаза 13, docs/SPEC_region_expansion.md) — не
+#: Python-enum, справочник теперь покрывает все 89 регионов и растёт без правки кода.
+#: Эти три сентинела остаются константами, т.к. участвуют в коде отдельными ветками
+#: (федеральный уровень / не определён).
+REGION_RF = "rf"
+REGION_MOSCOW = "moscow"
+REGION_UNDEFINED = "undefined"
 
 
 class SignalType(str, enum.Enum):

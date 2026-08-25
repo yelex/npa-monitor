@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from db.enums import Region, SignalCategory
+from db.catalog import load_regions
+from db.enums import REGION_UNDEFINED, SignalCategory
 
 _TOKEN_RE = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
 
@@ -51,11 +52,6 @@ _CATEGORY_TAGS: dict[SignalCategory, frozenset[str]] = {
     ),
 }
 
-_REGION_NAME: dict[Region, str | None] = {
-    Region.MOSCOW: "Москва",
-    Region.RF: "РФ",
-    Region.UNDEFINED: None,  # без фильтра — весь пул виден только через "не определён"
-}
 
 
 @dataclass(frozen=True)
@@ -146,23 +142,34 @@ def _matches_category(record: MeasureRecord, category: SignalCategory) -> bool:
     return bool(tags & set(record.tags))
 
 
-def _matches_region(record: MeasureRecord, region: Region) -> bool:
-    wanted = _REGION_NAME.get(region)
-    if wanted is None:  # undefined -> все регионы базы видны (спека, раздел «НЕ входит»)
+def _region_name(region: str) -> str | None:
+    """Имя региона по коду сигнала через `catalog.load_regions()` (Фаза 13) — единый
+    источник правды взамен захардкоженного словаря. `undefined` — спецкейс «без
+    фильтра» (в базе мер такого региона нет, спека раздел «НЕ входит»)."""
+    if region == REGION_UNDEFINED:
+        return None
+    entry = next((r for r in load_regions() if r.code == region), None)
+    return entry.name if entry else None
+
+
+def _matches_region(record: MeasureRecord, wanted: str | None) -> bool:
+    if wanted is None:  # undefined (или незнакомый код) -> все регионы базы видны
         return True
     return record.region == wanted
 
 
 def build_pool(
-    categories: list[SignalCategory], region: Region, *, path: str | Path
+    categories: list[SignalCategory], region: str, *, path: str | Path
 ) -> list[MeasureRecord]:
     """Пул кандидатов: объединение по всем подтверждённым ЖС сигнала (сигнал может
-    подтверждать несколько ЖС сразу, `category_toggle_kb`), пересечённое с регионом."""
+    подтверждать несколько ЖС сразу, `category_toggle_kb`), пересечённое с регионом.
+    Имя региона резолвится один раз на вызов (не на запись — 2297 записей в базе)."""
     records = load_records(path)
     cats = set(categories)
+    wanted = _region_name(region)
     return [
         r for r in records
-        if any(_matches_category(r, c) for c in cats) and _matches_region(r, region)
+        if any(_matches_category(r, c) for c in cats) and _matches_region(r, wanted)
     ]
 
 

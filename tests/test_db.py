@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.enums import REGION_RF, EventType, Priority, RejectionReason, SignalCategory, SignalStatus
 from db.models import DocumentSeen, Signal, SourceState
 from db.service import (
     InvalidStatusTransition,
@@ -35,7 +35,7 @@ def _make_signal(session: Session, **overrides) -> Signal:
         priority=Priority.HIGH,
         source_url="https://mintrud.gov.ru/docs/1",
         categories=[SignalCategory.VETERANS],
-        region=Region.RF,
+        region=REGION_RF,
         title="Приказ №1",
     )
     kwargs.update(overrides)

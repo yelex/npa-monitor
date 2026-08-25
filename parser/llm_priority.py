@@ -25,7 +25,7 @@ from collections.abc import Iterable, Sequence
 from sqlalchemy.orm import Session
 
 from db.catalog import ClassificationKeywords, load_classification_keywords
-from db.enums import EventType, Priority, Region, SignalCategory
+from db.enums import EventType, Priority, SignalCategory
 from db.models import Signal
 from parser.llm import ClassifierLLMClient, LLMError
 from parser.ru_stem import find_matches
@@ -55,7 +55,7 @@ class SignalPriorityContext:
     regex_priority: Priority
     categories: tuple[SignalCategory, ...]
     event_type: EventType
-    region: Region
+    region: str
     priority_word_matches: tuple[str, ...]
 
 
@@ -153,7 +153,7 @@ def _format_item(ctx: SignalPriorityContext) -> str:
     return (
         f'{{"id": {ctx.signal_id}, "title": {ctx.title!r}{summary_part}, '
         f'"regex_priority": "{ctx.regex_priority.value}", "категории": "{categories}", '
-        f'"тип_события": "{ctx.event_type.value}", "регион": "{ctx.region.value}", '
+        f'"тип_события": "{ctx.event_type.value}", "регион": "{ctx.region}", '
         f'"слова_приоритета": "{words}"}}'
     )
 

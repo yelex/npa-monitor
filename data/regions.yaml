@@ -1,14 +1,16 @@
 # Справочник регионов и их источников, AGENTS.md раздел 4.
 #
-# MVP-периметр: только Москва + РФ (федеральный уровень) — см. AGENTS.md раздел 1.
-# Формат рассчитан на все 89 субъектов РФ: добавление нового региона — новая запись в
-# этом файле, без изменения кода парсера. code должен совпадать со значением
-# db.enums.Region — там (как и с SignalCategory) в MVP всё ещё фиксированный
-# Python-enum, расширение набора регионов за пределы Москвы потребует и там правки —
-# осознанное ограничение MVP, см. AGENTS.md раздел 16.
+# Фаза 13 (docs/SPEC_region_expansion.md): покрывает все 89 регионов (rf/moscow/undefined
+# — сентинелы ниже + ~87 регионов, сгенерированных из data/benefits_knowledge_base.json).
+# code — не значение Python-enum (db.enums.Region удалён), просто строка: RegionEntry.code
+# читается как есть, без сверки с кодом (db/catalog.py::load_regions). Добавление нового
+# региона/источника — правка этого файла, без изменения кода парсера/бота.
 #
-# Отправная точка для сбора источников остальных регионов (после пилота):
-# http://pravo.gov.ru/links/region/ (AGENTS.md раздел 4).
+# rf/moscow/undefined — сентинел-коды (db.enums.REGION_RF/REGION_MOSCOW/REGION_UNDEFINED),
+# участвуют в коде отдельными ветками (федеральный уровень / не определён) — закреплены
+# руками, scripts/gen_regions_yaml.py их не создаёт и не перезаписывает. Остальные записи
+# ниже маркера — генерируются этим скриптом, ручные правки там будут потеряны при
+# следующем запуске.
 #
 # access у источников — см. пояснение в data/sources.yaml.
 
@@ -37,3 +39,273 @@
       note: >-
         требует уточнения: контент рендерится через JS, TLS-сертификат слит с mos.ru
         (docs/STAGE0.md) — нужен Playwright/аналог или внутренний API
+
+- code: undefined
+  name: Не определён
+  # Регион не определён классификатором — не значение из базы мер (db/measures.py::
+  # _region_name трактует этот код спецкейсом "без фильтра", а не именем для сравнения).
+  sources: []
+
+# --- Сгенерировано scripts/gen_regions_yaml.py (Фаза 13) из уникальных значений region
+
+- code: altaiskii-krai
+  name: Алтайский край
+  sources: []
+- code: amurskaya-oblast
+  name: Амурская область
+  sources: []
+- code: arkhangelskaya-oblast
+  name: Архангельская область
+  sources: []
+- code: astrakhanskaya-oblast
+  name: Астраханская область
+  sources: []
+- code: belgorodskaya-oblast
+  name: Белгородская область
+  sources: []
+- code: bryanskaya-oblast
+  name: Брянская область
+  sources: []
+- code: vladimirskaya-oblast
+  name: Владимирская область
+  sources: []
+- code: volgogradskaya-oblast
+  name: Волгоградская область
+  sources: []
+- code: vologodskaya-oblast
+  name: Вологодская область
+  sources: []
+- code: voronezhskaya-oblast
+  name: Воронежская область
+  sources: []
+- code: donetskaya-narodnaya-respublika
+  name: Донецкая Народная Республика
+  sources: []
+- code: evreiskaya-avtonomnaya-oblast
+  name: Еврейская автономная область
+  sources: []
+- code: zabaikalskii-krai
+  name: Забайкальский край
+  sources: []
+- code: zaporozhskaya-oblast
+  name: Запорожская область
+  sources: []
+- code: ivanovskaya-oblast
+  name: Ивановская область
+  sources: []
+- code: irkutskaya-oblast
+  name: Иркутская область
+  sources: []
+- code: kabardino-balkarskaya-respublika
+  name: Кабардино-Балкарская Республика
+  sources: []
+- code: kaliningradskaya-oblast
+  name: Калининградская область
+  sources: []
+- code: kaluzhskaya-oblast
+  name: Калужская область
+  sources: []
+- code: kamchatskii-krai
+  name: Камчатский край
+  sources: []
+- code: karachaevo-cherkesskaya-respublika
+  name: Карачаево-Черкесская Республика
+  sources: []
+- code: kemerovskaya-oblast
+  name: Кемеровская область
+  sources: []
+- code: kirovskaya-oblast
+  name: Кировская область
+  sources: []
+- code: kostromskaya-oblast
+  name: Костромская область
+  sources: []
+- code: krasnodarskii-krai
+  name: Краснодарский край
+  sources: []
+- code: krasnoyarskii-krai
+  name: Красноярский край
+  sources: []
+- code: kurganskaya-oblast
+  name: Курганская область
+  sources: []
+- code: kurskaya-oblast
+  name: Курская область
+  sources: []
+- code: leningradskaya-oblast
+  name: Ленинградская область
+  sources: []
+- code: lipetskaya-oblast
+  name: Липецкая область
+  sources: []
+- code: luganskaya-narodnaya-respublika
+  name: Луганская Народная Республика
+  sources: []
+- code: magadanskaya-oblast
+  name: Магаданская область
+  sources: []
+- code: moskovskaya-oblast
+  name: Московская область
+  sources: []
+- code: murmanskaya-oblast
+  name: Мурманская область
+  sources: []
+- code: nenetskii-avtonomnyi-okrug
+  name: Ненецкий автономный округ
+  sources: []
+- code: nizhegorodskaya-oblast
+  name: Нижегородская область
+  sources: []
+- code: novgorodskaya-oblast
+  name: Новгородская область
+  sources: []
+- code: novosibirskaya-oblast
+  name: Новосибирская область
+  sources: []
+- code: omskaya-oblast
+  name: Омская область
+  sources: []
+- code: orenburgskaya-oblast
+  name: Оренбургская область
+  sources: []
+- code: orlovskaya-oblast
+  name: Орловская область
+  sources: []
+- code: penzenskaya-oblast
+  name: Пензенская область
+  sources: []
+- code: permskii-krai
+  name: Пермский край
+  sources: []
+- code: primorskii-krai
+  name: Приморский край
+  sources: []
+- code: pskovskaya-oblast
+  name: Псковская область
+  sources: []
+- code: respublika-adygeya
+  name: Республика Адыгея
+  sources: []
+- code: respublika-altai
+  name: Республика Алтай
+  sources: []
+- code: respublika-bashkortostan
+  name: Республика Башкортостан
+  sources: []
+- code: respublika-buryatiya
+  name: Республика Бурятия
+  sources: []
+- code: respublika-dagestan
+  name: Республика Дагестан
+  sources: []
+- code: respublika-ingushetiya
+  name: Республика Ингушетия
+  sources: []
+- code: respublika-kalmykiya
+  name: Республика Калмыкия
+  sources: []
+- code: respublika-kareliya
+  name: Республика Карелия
+  sources: []
+- code: respublika-komi
+  name: Республика Коми
+  sources: []
+- code: respublika-krym
+  name: Республика Крым
+  sources: []
+- code: respublika-marii-el
+  name: Республика Марий Эл
+  sources: []
+- code: respublika-mordoviya
+  name: Республика Мордовия
+  sources: []
+- code: respublika-sakha-yakutiya
+  name: Республика Саха (Якутия)
+  sources: []
+- code: respublika-severnaya-osetiya-alaniya
+  name: Республика Северная Осетия - Алания
+  sources: []
+- code: respublika-tatarstan
+  name: Республика Татарстан
+  sources: []
+- code: respublika-tyva
+  name: Республика Тыва
+  sources: []
+- code: respublika-khakasiya
+  name: Республика Хакасия
+  sources: []
+- code: rostovskaya-oblast
+  name: Ростовская область
+  sources: []
+- code: ryazanskaya-oblast
+  name: Рязанская область
+  sources: []
+- code: samarskaya-oblast
+  name: Самарская область
+  sources: []
+- code: sankt-peterburg
+  name: Санкт-Петербург
+  sources: []
+- code: saratovskaya-oblast
+  name: Саратовская область
+  sources: []
+- code: sakhalinskaya-oblast
+  name: Сахалинская область
+  sources: []
+- code: sverdlovskaya-oblast
+  name: Свердловская область
+  sources: []
+- code: sevastopol
+  name: Севастополь
+  sources: []
+- code: smolenskaya-oblast
+  name: Смоленская область
+  sources: []
+- code: stavropolskii-krai
+  name: Ставропольский край
+  sources: []
+- code: tambovskaya-oblast
+  name: Тамбовская область
+  sources: []
+- code: tverskaya-oblast
+  name: Тверская область
+  sources: []
+- code: tomskaya-oblast
+  name: Томская область
+  sources: []
+- code: tulskaya-oblast
+  name: Тульская область
+  sources: []
+- code: tyumenskaya-oblast
+  name: Тюменская область
+  sources: []
+- code: udmurtskaya-respublika
+  name: Удмуртская Республика
+  sources: []
+- code: ulyanovskaya-oblast
+  name: Ульяновская область
+  sources: []
+- code: khabarovskii-krai
+  name: Хабаровский край
+  sources: []
+- code: khanty-mansiiskii-avtonomnyi-okrug-yugra
+  name: Ханты-Мансийский автономный округ - Югра
+  sources: []
+- code: chelyabinskaya-oblast
+  name: Челябинская область
+  sources: []
+- code: chechenskaya-respublika
+  name: Чеченская Республика
+  sources: []
+- code: chuvashskaya-respublika-chuvashiya
+  name: Чувашская Республика - Чувашия
+  sources: []
+- code: chukotskii-avtonomnyi-okrug
+  name: Чукотский автономный округ
+  sources: []
+- code: yamalo-nenetskii-avtonomnyi-okrug
+  name: Ямало-Ненецкий автономный округ
+  sources: []
+- code: yaroslavskaya-oblast
+  name: Ярославская область
+  sources: []

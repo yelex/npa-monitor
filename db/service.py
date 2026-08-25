@@ -10,7 +10,7 @@ import datetime as dt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.enums import REGION_UNDEFINED, EventType, Priority, RejectionReason, SignalCategory, SignalStatus
 from db.models import DocumentSeen, Signal, SignalCategoryLink, SourceState, StatusHistory
 
 # Допустимые переходы статуса сигнала (AGENTS.md раздел 6):
@@ -48,7 +48,7 @@ def create_signal(
     priority: Priority,
     source_url: str,
     categories: list[SignalCategory],
-    region: Region = Region.UNDEFINED,
+    region: str = REGION_UNDEFINED,
     title: str | None = None,
     requisites: str | None = None,
     measure_id: str | None = None,

@@ -1,13 +1,13 @@
 """Загрузчик справочников (ЖС, источники, регионы) из data/, AGENTS.md раздел 1, PLAN.md
 Фаза 2.
 
-Справочники — YAML-файлы в data/, не таблицы БД: расширение (новая ЖС/новый регион/
-источник) делается правкой файла, без изменения кода парсера/классификатора (AGENTS.md
-раздел 1). db.enums.SignalCategory и Region в MVP остаются фиксированными Python-
-перечислениями (см. AGENTS.md раздел 16) — это осознанное ограничение MVP: набор *видов*
-ЖС/регионов пока правится вместе с кодом, а вот их ключевые слова и источники — уже нет.
-Загрузчик явно проверяет соответствие id/code из справочников значениям этих enum'ов и
-падает с понятной ошибкой при рассинхронизации, а не молча игнорирует лишнее.
+Справочники — YAML-файлы в data/, не таблицы БД: расширение делается правкой файла, без
+изменения кода парсера/классификатора (AGENTS.md раздел 1). db.enums.SignalCategory
+остаётся фиксированным Python-перечислением (см. AGENTS.md раздел 16, п.12) — загрузчик
+явно проверяет соответствие id из life_situations.yaml значениям этого enum'а и падает с
+понятной ошибкой при рассинхронизации. Регионы (Фаза 13, docs/SPEC_region_expansion.md) —
+исключение: `RegionEntry.code` больше не сверяется ни с каким enum'ом, `data/regions.yaml`
+— единственный источник истины, покрывает все 89 регионов + rf/moscow/undefined.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from db.enums import EventType, Region, SignalCategory
+from db.enums import EventType, SignalCategory
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -46,7 +46,6 @@ class LifeSituation:
 class RegionEntry:
     code: str
     name: str
-    region: Region
     sources: tuple[Source, ...]
 
 
@@ -92,18 +91,19 @@ def load_sources(path: Path | None = None) -> dict[str, tuple[Source, ...]]:
 
 
 def load_regions(path: Path | None = None) -> tuple[RegionEntry, ...]:
+    """Фаза 13: code — просто строка, без сверки с enum'ом (regions.yaml — источник
+    истины). Гарантирует уникальность code (иначе `find_region_matches`/сигналы могли бы
+    молча схлопнуть два разных региона)."""
     raw = _load_yaml(path or DATA_DIR / "regions.yaml") or []
     result: list[RegionEntry] = []
+    seen: set[str] = set()
     for item in raw:
-        try:
-            region = Region(item["code"])
-        except ValueError as exc:
-            raise CatalogError(
-                f"regions.yaml: code={item['code']!r} не соответствует db.enums.Region — "
-                f"добавь значение в enum или исправь code"
-            ) from exc
+        code = item["code"]
+        if code in seen:
+            raise CatalogError(f"regions.yaml: дублирующийся code={code!r}")
+        seen.add(code)
         sources = tuple(Source(**s) for s in item.get("sources", []))
-        result.append(RegionEntry(code=item["code"], name=item["name"], region=region, sources=sources))
+        result.append(RegionEntry(code=code, name=item["name"], sources=sources))
     return tuple(result)
 
 

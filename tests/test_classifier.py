@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from db.enums import EventType, Priority, Region, SignalCategory
+from db.enums import REGION_MOSCOW, REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory
 from parser.classifier import Classifier
 from parser.models import Publication
 
@@ -88,14 +88,14 @@ def test_high_priority_document_marker_priority_word_and_known_region() -> None:
         "sfr.gov.ru/press_center/news", "постановление ветеран боевых действий выплата новый"
     )
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.RF
+    assert result.region == REGION_RF
     assert result.priority == Priority.HIGH
 
 
 def test_medium_priority_document_marker_without_priority_word() -> None:
     pub = _publication("mintrud.gov.ru/docs", "приказ инвалид пособие")
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.RF
+    assert result.region == REGION_RF
     assert result.priority == Priority.MEDIUM
 
 
@@ -104,7 +104,7 @@ def test_medium_priority_forced_by_undefined_region_even_with_high_words() -> No
     остальные признаки указывали бы на высокий."""
     pub = _publication("tass.ru", "постановление ветеран боевых действий выплата новый")
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.UNDEFINED
+    assert result.region == REGION_UNDEFINED
     assert result.priority == Priority.MEDIUM
 
 
@@ -122,7 +122,7 @@ def test_medium_priority_from_priority_word_without_document_marker() -> None:
         "rg.ru", "Евгений Солнцев: в Оренбуржье ввели новую меру поддержки участникам СВО"
     )
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.UNDEFINED
+    assert result.region == REGION_UNDEFINED
     assert result.priority == Priority.MEDIUM
 
 
@@ -132,7 +132,7 @@ def test_medium_priority_from_priority_word_without_document_marker_when_region_
     # известном регионе.
     pub = _publication("sfr.gov.ru/press_center/news", "ветеран боевых действий новая выплата")
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.RF
+    assert result.region == REGION_RF
     assert result.priority == Priority.MEDIUM
 
 
@@ -142,13 +142,13 @@ def test_medium_priority_from_priority_word_without_document_marker_when_region_
 def test_moscow_region_detected_from_regional_source() -> None:
     pub = _publication("mos.ru/authority/documents", "постановление участник СВО выплата")
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.MOSCOW
+    assert result.region == REGION_MOSCOW
 
 
 def test_undefined_region_for_contextual_source() -> None:
     pub = _publication("tass.ru", "постановление участник СВО выплата")
     result = CLASSIFIER.classify(pub)
-    assert result.region == Region.UNDEFINED
+    assert result.region == REGION_UNDEFINED
 
 
 # --- Релевантность ---

@@ -7,7 +7,7 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus
+from db.enums import REGION_RF, EventType, Priority, RejectionReason, SignalCategory, SignalStatus
 from db.service import create_signal, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import Classifier
@@ -44,7 +44,7 @@ def _rejected_signal(
         priority=Priority.MEDIUM,
         source_url=source_url,
         categories=[SignalCategory.VETERANS],
-        region=Region.RF,
+        region=REGION_RF,
         title=title,
     )
     signal.created_at = created_at

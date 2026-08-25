@@ -18,9 +18,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from db.enums import (
+    REGION_UNDEFINED,
     EventType,
     Priority,
-    Region,
     RejectionReason,
     SignalCategory,
     SignalStatus,
@@ -54,9 +54,10 @@ class Signal(Base):
 
     title: Mapped[str | None] = mapped_column(Text, default=None)  # Название документа
     requisites: Mapped[str | None] = mapped_column(Text, default=None)  # Реквизиты
-    region: Mapped[Region] = mapped_column(
-        Enum(Region, native_enum=False, length=16), default=Region.UNDEFINED
-    )
+    # Фаза 13 (docs/SPEC_region_expansion.md): код региона — строка, значение
+    # `RegionEntry.code` из `data/regions.yaml` (89 регионов + rf/moscow/undefined),
+    # не Python-enum — справочник растёт без миграции схемы.
+    region: Mapped[str] = mapped_column(String(64), default=REGION_UNDEFINED)
     source_url: Mapped[str] = mapped_column(Text)  # Ссылка на публикацию
 
     # Ссылка на НПА, подтверждённая экспертом (раздел 10, шаг 5) — отдельно от source_url,

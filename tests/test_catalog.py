@@ -16,7 +16,7 @@ from db.catalog import (
     load_regions,
     load_sources,
 )
-from db.enums import EventType, Region, SignalCategory
+from db.enums import EventType, SignalCategory
 
 
 def test_load_life_situations_default_covers_all_categories() -> None:
@@ -26,11 +26,16 @@ def test_load_life_situations_default_covers_all_categories() -> None:
     assert all(s.keywords for s in situations)
 
 
-def test_load_regions_default_covers_mvp_scope() -> None:
+def test_load_regions_default_covers_full_catalog() -> None:
+    """Фаза 13 (docs/SPEC_region_expansion.md): справочник расширен до всех 89 регионов
+    + сентинелы rf/moscow/undefined — не только MVP-периметр Москва+РФ."""
     regions = load_regions()
+    codes = {r.code for r in regions}
 
-    assert {r.region for r in regions} == {Region.RF, Region.MOSCOW}
-    moscow = next(r for r in regions if r.region == Region.MOSCOW)
+    assert {"rf", "moscow", "undefined"} <= codes
+    assert len(regions) >= 89
+
+    moscow = next(r for r in regions if r.code == "moscow")
     assert moscow.sources
     assert all(isinstance(s, Source) for s in moscow.sources)
 
@@ -96,21 +101,20 @@ def test_new_life_situation_picked_up_without_code_change(tmp_path: Path) -> Non
     assert situations[0].category == SignalCategory.VETERANS
 
 
-def test_new_region_source_picked_up_without_code_change(tmp_path: Path) -> None:
-    """Симметрично test_new_life_situation_picked_up_without_code_change, но для
-    региона: тот же честный охват — новый источник для уже существующего региона
-    (code) подхватывается из YAML без кода; совершенно новый субъект РФ (не значение
-    Region enum) — по-прежнему требует правки db/enums.py (см. data/regions.yaml
-    докстринг, AGENTS.md раздел 16 п.12)."""
+def test_new_region_picked_up_without_code_change(tmp_path: Path) -> None:
+    """Фаза 13 (docs/SPEC_region_expansion.md): в отличие от ЖС, регион — просто строка
+    (`RegionEntry.code`, без enum), поэтому совершенно новый субъект РФ (не только новый
+    источник для уже существующего code) тоже подхватывается из YAML без правки кода —
+    именно это ограничение MVP снимает Фаза 13 (AGENTS.md раздел 16 п.12)."""
     custom_path = tmp_path / "regions.yaml"
     custom_path.write_text(
         textwrap.dedent(
             """
-            - code: moscow
-              name: Москва
+            - code: novy-region
+              name: Новый регион
               sources:
-                - domain: newly-added-source.mos.ru
-                  url: https://newly-added-source.mos.ru/docs/
+                - domain: newly-added-source.example.ru
+                  url: https://newly-added-source.example.ru/docs/
                   access: direct
             """
         ),
@@ -120,8 +124,8 @@ def test_new_region_source_picked_up_without_code_change(tmp_path: Path) -> None
     regions = load_regions(custom_path)
 
     assert len(regions) == 1
-    assert regions[0].region == Region.MOSCOW
-    assert [s.domain for s in regions[0].sources] == ["newly-added-source.mos.ru"]
+    assert regions[0].code == "novy-region"
+    assert [s.domain for s in regions[0].sources] == ["newly-added-source.example.ru"]
 
 
 def test_unknown_life_situation_id_raises_catalog_error(tmp_path: Path) -> None:
@@ -141,20 +145,27 @@ def test_unknown_life_situation_id_raises_catalog_error(tmp_path: Path) -> None:
         load_life_situations(custom_path)
 
 
-def test_unknown_region_code_raises_catalog_error(tmp_path: Path) -> None:
+def test_duplicate_region_code_raises_catalog_error(tmp_path: Path) -> None:
+    """Фаза 13: `load_regions()` больше не сверяет code с enum'ом (см.
+    test_new_region_picked_up_without_code_change), но по-прежнему требует уникальности
+    code — иначе `find_region_matches`/сигналы могли бы молча схлопнуть два разных
+    региона в один."""
     custom_path = tmp_path / "regions.yaml"
     custom_path.write_text(
         textwrap.dedent(
             """
-            - code: atlantis
-              name: Несуществующий регион
+            - code: dup
+              name: Первый
+              sources: []
+            - code: dup
+              name: Второй
               sources: []
             """
         ),
         encoding="utf-8",
     )
 
-    with pytest.raises(CatalogError, match="atlantis"):
+    with pytest.raises(CatalogError, match="dup"):
         load_regions(custom_path)
 
 

@@ -20,7 +20,16 @@ import pytest
 
 import bot.main as bot_main
 from bot.autoupdate_client import AutoUpdateAgentClient
-from db.enums import EventType, Priority, Region, RejectionReason, SignalCategory, SignalStatus, SignalType
+from db.enums import (
+    REGION_MOSCOW,
+    REGION_RF,
+    EventType,
+    Priority,
+    RejectionReason,
+    SignalCategory,
+    SignalStatus,
+    SignalType,
+)
 from db.service import create_signal, transition_status
 
 
@@ -45,7 +54,7 @@ def _make_signal(**overrides) -> int:
             priority=Priority.HIGH,
             source_url="https://sfr.gov.ru/1",
             categories=[SignalCategory.VETERANS],
-            region=Region.RF,
+            region=REGION_RF,
             title="Тестовый сигнал",
         )
         kwargs.update(overrides)
@@ -779,7 +788,7 @@ async def test_on_region_button_selects_region_and_reaches_sent_to_agent() -> No
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
     with factory() as session:
-        assert session.get(bot_main.Signal, sig_id).region == Region.MOSCOW
+        assert session.get(bot_main.Signal, sig_id).region == REGION_MOSCOW
     assert "Передан агенту" in cb_region.message.answer.await_args.args[0]
 
 
@@ -788,8 +797,8 @@ def _region_search_fixture() -> tuple:
     область») — независимо от реального содержимого data/regions.yaml проверяет три
     исхода `find_region_matches`/`on_region_manual`: 0, 1, 2+ совпадений."""
     return (
-        bot_main.RegionEntry(code="moscow", name="Москва", region=Region.MOSCOW, sources=()),
-        bot_main.RegionEntry(code="moscow_obl", name="Московская область", region=Region.UNDEFINED, sources=()),
+        bot_main.RegionEntry(code="moscow", name="Москва", sources=()),
+        bot_main.RegionEntry(code="moscow_obl", name="Московская область", sources=()),
     )
 
 
@@ -799,6 +808,30 @@ def test_find_region_matches_zero_one_and_multiple(monkeypatch) -> None:
     assert bot_main.find_region_matches("Атлантида") == []
     assert [r.code for r in bot_main.find_region_matches("Москва")] == ["moscow"]
     assert {r.code for r in bot_main.find_region_matches("моск")} == {"moscow", "moscow_obl"}
+
+
+def test_find_region_matches_lemma_path_handles_prepositional_case() -> None:
+    """SPEC п.3, ступень 2: против реального `data/regions.yaml` (89 регионов, не
+    фикстуры) — «Татарстане» (предложный падеж) не встречается как подстрока
+    «Республика Татарстан», матчится только через леммы pymorphy3."""
+    matches = bot_main.find_region_matches("Татарстане")
+    assert [r.code for r in matches] == ["respublika-tatarstan"]
+
+
+def test_find_region_matches_lemma_path_ignores_prepositions() -> None:
+    """«в Волгоградской области» — без фильтра предлогов лемма «область» пересеклась бы
+    почти со всеми областями (см. _REGION_QUERY_STOPWORDS); с фильтром и требованием
+    подмножества лемм остаётся только Волгоградская."""
+    matches = bot_main.find_region_matches("в Волгоградской области")
+    assert [r.code for r in matches] == ["volgogradskaya-oblast"]
+
+
+def test_find_region_matches_lemma_path_multiple_candidates() -> None:
+    """Общее слово («область») без уточнения — намеренно широкий результат (2+
+    кандидата), как и в substring-пути: аналитик уточняет запрос."""
+    matches = bot_main.find_region_matches("область")
+    assert len(matches) > 10
+    assert "volgogradskaya-oblast" in {r.code for r in matches}
 
 
 async def test_on_region_manual_zero_matches_asks_to_retry(monkeypatch) -> None:
@@ -829,7 +862,7 @@ async def test_on_region_manual_single_match_finishes_flow(monkeypatch) -> None:
     assert _get_status(sig_id) == SignalStatus.SENT_TO_AGENT
     factory = bot_main.get_session_factory()
     with factory() as session:
-        assert session.get(bot_main.Signal, sig_id).region == Region.MOSCOW
+        assert session.get(bot_main.Signal, sig_id).region == REGION_MOSCOW
 
 
 async def test_on_region_manual_multiple_matches_asks_to_narrow(monkeypatch) -> None:
@@ -852,7 +885,7 @@ async def test_on_region_manual_multiple_matches_asks_to_narrow(monkeypatch) -> 
 
 
 async def test_finish_npa_flow_records_audit_reason_on_divergence() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=REGION_RF)
 
     await _run_full_npa_flow(sig_id, region_code="moscow")  # аналитик поменял регион
 
@@ -868,7 +901,7 @@ async def test_finish_npa_flow_records_audit_reason_on_divergence() -> None:
 
 
 async def test_finish_npa_flow_no_audit_reason_without_divergence() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=REGION_RF)
 
     await _run_full_npa_flow(sig_id, region_code="rf")  # подтверждение = классификатор один в один
 
@@ -901,7 +934,7 @@ async def test_signal_type_kb_has_change_and_new_buttons() -> None:
 
 
 async def test_choosing_new_skips_measure_step_and_reaches_sent_to_agent() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -925,7 +958,7 @@ async def test_choosing_new_skips_measure_step_and_reaches_sent_to_agent() -> No
 
 
 async def test_choosing_change_shows_measure_prompt_with_only_not_in_base_button() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -940,7 +973,7 @@ async def test_choosing_change_shows_measure_prompt_with_only_not_in_base_button
 
 
 async def test_measure_query_shows_ranked_candidates() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -963,7 +996,7 @@ async def test_measure_query_shows_ranked_candidates() -> None:
 
 
 async def test_measure_button_selects_candidate_and_finishes_flow() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -990,7 +1023,7 @@ async def test_measure_button_selects_candidate_and_finishes_flow() -> None:
 
 
 async def test_measure_button_next_page_shows_more_candidates() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -1009,7 +1042,7 @@ async def test_measure_button_next_page_shows_more_candidates() -> None:
 
 
 async def test_measure_button_manual_reentry_prompts_new_search_without_finishing() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -1029,7 +1062,7 @@ async def test_measure_button_manual_reentry_prompts_new_search_without_finishin
 
 
 async def test_measure_button_none_finishes_flow_with_null_measure_id() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -1054,7 +1087,7 @@ async def test_measure_query_empty_pool_still_offers_not_in_base(monkeypatch) ->
     """Категория ВБД в реальной базе — все записи с пустым measure_id (799 исключённых,
     см. спеку) -> пул после фильтра пуст для любого запроса. Флоу не должен падать —
     аналитик всё равно может завершить через «Нет в базе»."""
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=REGION_RF)
     state = FakeState({"sig_id": sig_id})
     await _send_npa_link(sig_id, state, "skip")
     await _confirm_categories(sig_id, state)
@@ -1081,7 +1114,7 @@ def test_autoupdate_client_send_writes_task_contract_with_real_enum_codes() -> N
     """SPEC_signal_type_measure_select.md: schema_version=2, signal_id отдельным полем
     (не парсим `task_id`), categories/region/signal_type/measure_id/measure_row_hash —
     реальные значения контракта v2."""
-    sig_id = _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO], region=Region.MOSCOW)
+    sig_id = _make_signal(categories=[SignalCategory.VETERANS, SignalCategory.SVO], region=REGION_MOSCOW)
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
@@ -1207,7 +1240,7 @@ async def test_finish_npa_flow_does_not_commit_when_task_write_fails(monkeypatch
 
 async def test_reconcile_spool_tasks_writes_missing_task_for_sent_to_agent_signal() -> None:
     """SPEC раздел 3.2: сверка при старте — SENT_TO_AGENT без файла в spool -> дозапись."""
-    sig_id = _make_signal(categories=[SignalCategory.DISABLED], region=Region.MOSCOW)
+    sig_id = _make_signal(categories=[SignalCategory.DISABLED], region=REGION_MOSCOW)
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
@@ -1253,7 +1286,7 @@ async def test_reconcile_spool_tasks_rewrites_v1_task_to_v2() -> None:
     (schema_version=1, задачи, записанные до этой доработки) -> перезапись v1->v2.
     Сигнал без подтверждённого `signal_type` (создан до внедрения шага выбора типа) —
     осознанная деградация: change/measure_id=null, пометка в comment."""
-    sig_id = _make_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
@@ -1291,7 +1324,7 @@ async def test_reconcile_spool_tasks_rewrites_v1_task_to_v2() -> None:
 async def test_reconcile_spool_tasks_preserves_confirmed_signal_type_on_v1_rewrite() -> None:
     """Если `signal.signal_type` уже подтверждён (записан через полный флоу, но файл
     почему-то остался v1) — сверка использует реальный тип/меру, без пометки деградации."""
-    sig_id = _make_signal(categories=[SignalCategory.SVO], region=Region.RF)
+    sig_id = _make_signal(categories=[SignalCategory.SVO], region=REGION_RF)
     factory = bot_main.get_session_factory()
     with factory() as session:
         signal = session.get(bot_main.Signal, sig_id)
@@ -1514,7 +1547,7 @@ async def test_cmd_sent_reports_no_signals_when_empty() -> None:
 
 
 async def test_cmd_sent_shows_card_with_confirmation_details(monkeypatch) -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=REGION_RF)
     monkeypatch.setattr(bot_main, "fetch", MagicMock(return_value=None))
     monkeypatch.setattr(bot_main._autoupdate_client, "send", MagicMock())
     await _run_full_npa_flow(sig_id, link_text="https://sfr.gov.ru/document/1", region_code="rf")
@@ -1536,7 +1569,7 @@ async def test_cmd_sent_shows_card_with_confirmation_details(monkeypatch) -> Non
 
 
 async def test_cmd_sent_shows_audit_line_on_analyst_divergence() -> None:
-    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=Region.RF)
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.VETERANS], region=REGION_RF)
     await _run_full_npa_flow(sig_id, region_code="moscow")  # аналитик поменял регион
 
     message = MagicMock()

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.orm import Session
 
-from db.enums import EventType, Priority, Region, SignalCategory, SignalStatus
+from db.enums import REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory, SignalStatus
 from db.models import Signal
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import ClassificationResult
@@ -35,7 +35,7 @@ def test_build_signal_creates_signal_for_relevant_publication(session: Session) 
         is_relevant=True,
         categories=(SignalCategory.VETERANS,),
         event_type=EventType.NEW_DOCUMENT,
-        region=Region.RF,
+        region=REGION_RF,
         priority=Priority.HIGH,
     )
 
@@ -46,7 +46,7 @@ def test_build_signal_creates_signal_for_relevant_publication(session: Session) 
     assert signal.status == SignalStatus.NEW
     assert signal.event_type == EventType.NEW_DOCUMENT
     assert signal.priority == Priority.HIGH
-    assert signal.region == Region.RF
+    assert signal.region == REGION_RF
     assert signal.source_url == "https://sfr.gov.ru/press_center/news/1"
     assert signal.title == "постановление ветеран боевых действий выплата новый"
     assert [c.category for c in signal.categories] == [SignalCategory.VETERANS]
@@ -57,7 +57,7 @@ def test_build_signal_returns_none_for_irrelevant_publication(session: Session) 
         is_relevant=False,
         categories=(),
         event_type=EventType.REVIEW,
-        region=Region.UNDEFINED,
+        region=REGION_UNDEFINED,
         priority=Priority.LOW,
     )
 
