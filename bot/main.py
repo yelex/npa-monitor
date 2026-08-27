@@ -1308,6 +1308,28 @@ RESULTS_SCAN_INTERVAL = 300  # 5 минут, SPEC раздел 3.6
 RESULT_STATUS_LABELS = {"done": "готово", "nothing_found": "ничего не найдено", "error": "ошибка"}
 
 
+def _split_message(text: str, limit: int = 3900) -> list[str]:
+    """SPEC_result_card_split: режет длинную карточку на части ≤ limit по границам строк.
+    Details — экранированный plain text, HTML-тегов внутри нет, рвать можно по \n.
+    Если строка длиннее limit — жёсткая резка (крайний случай, не должен встречаться)."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    # запас под префикс "(N/M)\n" — до 7 символов
+    eff = limit - 8
+    rest = text
+    while len(rest) > eff:
+        cut = rest.rfind("\n", 0, eff)
+        if cut <= 0:
+            cut = eff
+        chunks.append(rest[:cut].rstrip("\n"))
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        chunks.append(rest)
+    total = len(chunks)
+    return [c if total == 1 else f"({i}/{total})\n{c}" for i, c in enumerate(chunks, 1)]
+
+
 def result_card(payload: dict, s: Signal) -> str:
     """Карточка по результату агента (SPEC раздел 3.4/3.6): статус, summary (+details,
     если есть). Решение о переходе в «Завершён» — за аналитиком, `/complete <id>`."""
@@ -1355,10 +1377,24 @@ async def scan_autoupdate_results(bot: Bot) -> int:
             continue
 
         text = result_card(payload, s)
+        # SPEC_result_card_split: шинкование >4096 (message is too long ронял скан-луп)
+        delivered = True
         for uid in get_settings().allowed_user_ids:
-            await bot.send_message(uid, text)
+            for i, chunk in enumerate(_split_message(text), 1):
+                try:
+                    await bot.send_message(uid, chunk)
+                except Exception:
+                    delivered = False
+                    log.exception(
+                        "автообновление: не удалось отправить карточку %s (кусок %d) uid=%s",
+                        path, i, uid,
+                    )
+        # Архивируем даже при сбое отправки: повторная попытка дала бы дубли тем,
+        # кому дошло; полный результат остаётся в .processed/ (SPEC, п.3 компромисса).
         archive_result(path, spool_dir)
         sent_count += 1
+        if not delivered:
+            log.warning("автообновление: карточка %s отправлена с ошибками uid, архивирована", path)
     return sent_count
 
 
