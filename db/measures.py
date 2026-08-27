@@ -134,6 +134,36 @@ def load_records(path: str | Path) -> tuple[MeasureRecord, ...]:
     return _load_records(str(path))
 
 
+# docs/SPEC_result_edit.md §3.3: полей, которые нельзя перезаписать через overlay
+# аналитика — идентификатор записи и вычисляемый при экспорте хэш содержимого.
+_KB_NON_OVERRIDABLE_FIELDS = frozenset({"measure_id", "row_hash"})
+
+
+@lru_cache(maxsize=4)
+def _load_raw_rows(path: str) -> tuple[dict, ...]:
+    return tuple(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def kb_field_names(path: str | Path) -> frozenset[str]:
+    """Whitelist полей KB для overlay (§3.3, ревью №7) — множество ключей, реально
+    встречающихся в снапшоте, не хардкод-список: формат карточки меры со временем
+    расширяется новыми полями (AGENTS.md раздел 8), схема должна расти вместе с ним
+    без правки кода."""
+    fields: set[str] = set()
+    for row in _load_raw_rows(str(path)):
+        fields.update(row.keys())
+    return frozenset(fields) - _KB_NON_OVERRIDABLE_FIELDS
+
+
+def load_raw_record(measure_id: str, *, path: str | Path) -> dict | None:
+    """Сырая запись KB (все поля, не только проекция `MeasureRecord`) — нужна
+    write-back'у (`db/overrides.py`) для чтения текущего значения поля."""
+    for row in _load_raw_rows(str(path)):
+        if row.get("measure_id") == measure_id:
+            return row
+    return None
+
+
 def _matches_category(record: MeasureRecord, category: SignalCategory) -> bool:
     datasets = _CATEGORY_SOURCE_DATASETS.get(category, frozenset())
     if record.source_dataset in datasets:

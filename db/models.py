@@ -6,8 +6,10 @@ SQLite WAL, без Alembic в MVP — таблицы создаются чере
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 from sqlalchemy import (
+    JSON,
     Enum,
     ForeignKey,
     Index,
@@ -173,3 +175,59 @@ class Expert(Base):
     name: Mapped[str | None] = mapped_column(String(128), default=None)
     is_active: Mapped[bool] = mapped_column(default=True)
     added_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
+
+
+class SignalResult(Base):
+    """Результат агента автообновления, сохранённый до архивации spool-файла
+    (docs/SPEC_result_edit.md §3.4, ревью №3) — источник `changes[]`/`selection`
+    для write-back в `measure_overrides`, переживает рестарт бота и архивацию
+    `results/<task_id>.json` в `results/.processed/`."""
+
+    __tablename__ = "signal_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    signal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signals.id", ondelete="SET NULL"), default=None
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # Промежуточный выбор аналитика по чекбоксам карточки (accept/skip/custom/delete
+    # по индексу поля в payload["changes"]) — JSON, не FSM: переживает рестарт бота
+    # (спека §3.4).
+    selection: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)
+    received_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
+
+
+class MeasureOverride(Base):
+    """Overlay ручной правки поля меры поверх KB-снапшота (docs/SPEC_result_edit.md
+    §3.3) — KB-файл сам не патчится (перезаливаемый снапшот), правки применяются
+    поверх него при экспорте (`scripts/export_kb.py`) и при чтении «эффективного»
+    значения (`db/overrides.py::effective_value`).
+
+    Один override = одна правка одного поля; повторная правка того же поля —
+    новая строка (история), актуальность — по последнему `changed_at`.
+    `base_row_hash` — row_hash KB-записи на момент, когда считался дифф
+    (`Signal.measure_row_hash`), для детекта STALE на стороне бота.
+    """
+
+    __tablename__ = "measure_overrides"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    measure_id: Mapped[str] = mapped_column(String(64), index=True)
+    field: Mapped[str] = mapped_column(String(64))
+    old_value: Mapped[Any] = mapped_column(JSON, nullable=True, default=None)
+    new_value: Mapped[Any] = mapped_column(JSON, nullable=True, default=None)  # null = «удалено аналитиком»
+    signal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signals.id", ondelete="SET NULL"), default=None
+    )
+    source: Mapped[str] = mapped_column(String(16), default="agent_diff")  # agent_diff | manual
+    changed_by: Mapped[str | None] = mapped_column(String(128), default=None)
+    changed_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow)
+    task_id: Mapped[str] = mapped_column(String(64))
+    base_row_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+
+    __table_args__ = (
+        # Дедуп ревью №4: тот же результат агента не применяется к одному полю
+        # меры дважды (даблтап/ретрай «Применить» игнорируется).
+        UniqueConstraint("measure_id", "field", "task_id", name="uq_measure_overrides_dedup"),
+    )

@@ -42,10 +42,19 @@ from db.enums import (
 from db.measures import MeasureRecord, build_pool, lemmatized_bow
 from db.measures import rank as rank_measures
 from db.models import Signal, SignalCategoryLink, StatusHistory
+from db.overrides import (
+    ApplyResult,
+    NoMeasureForTask,
+    apply_selection,
+    get_signal_result,
+    overridden_measure_ids,
+    upsert_signal_result,
+)
 from db.service import InvalidStatusTransition, transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.fetcher import SourceUnavailable, fetch
 from parser.filters import domain_of, is_domain_whitelisted
+from scripts.export_kb import export_kb
 
 log = logging.getLogger("bot")
 
@@ -106,6 +115,15 @@ class NpaFlow(StatesGroup):
     # теперь вызывается из конца этой цепочки, не из региона.
     ask_signal_type = State()
     ask_measure = State()
+
+
+class ResultEditFlow(StatesGroup):
+    """docs/SPEC_result_edit.md §3.4: ✏ на карточке диффа результата агента просит
+    текст нового значения поля reply'ом. Сам выбор (accept/skip/delete) живёт в
+    `SignalResult.selection` (БД, переживает рестарт) — это состояние только про
+    ожидание одного текстового ответа, не про сами данные."""
+
+    ask_value = State()
 
 
 # --- Auth --------------------------------------------------------------------
@@ -305,9 +323,13 @@ def signal_type_kb(sig_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def measure_label(record: MeasureRecord) -> str:
+def measure_label(record: MeasureRecord, *, overridden_at: dt.date | None = None) -> str:
+    """`overridden_at` — docs/SPEC_result_edit.md §3.3: мера с хотя бы одним
+    `measure_overrides` помечается «✏️ правлено», признак derivable, отдельной
+    колонки в KB не заводим."""
     name = record.human_readable_name or record.measure_name or record.measure_id
-    label = f"{name} [{record.measure_id}]"
+    badge = f" ✏️ правлено {overridden_at:%d.%m}" if overridden_at else ""
+    label = f"{name} [{record.measure_id}]{badge}"
     return label if len(label) <= 64 else label[:61] + "..."
 
 
@@ -1118,9 +1140,16 @@ async def on_measure_query(message: Message, state: FSMContext) -> None:
     region = data["region"]
     pool = build_pool(categories, region, path=get_settings().benefits_knowledge_base_path)
     ranked = rank_measures(query, pool)
+    top = [r for r, _score in ranked[:MEASURE_CANDIDATE_LIMIT]]
+    with get_session_factory()() as db:
+        overridden = overridden_measure_ids(db, [r.measure_id for r in top])
     candidates = [
-        {"measure_id": r.measure_id, "label": measure_label(r), "row_hash": r.row_hash}
-        for r, _score in ranked[:MEASURE_CANDIDATE_LIMIT]
+        {
+            "measure_id": r.measure_id,
+            "label": measure_label(r, overridden_at=overridden.get(r.measure_id)),
+            "row_hash": r.row_hash,
+        }
+        for r in top
     ]
     await state.update_data(measure_query=query, measure_candidates=candidates, measure_offset=0)
 
@@ -1330,6 +1359,72 @@ def _split_message(text: str, limit: int = 3900) -> list[str]:
     return [c if total == 1 else f"({i}/{total})\n{c}" for i, c in enumerate(chunks, 1)]
 
 
+# docs/SPEC_result_edit.md §3.1: `changes[].match` — метка совпадения экстракции с
+# ожиданием, как её присылает коннектор npa-somas.
+MATCH_LABELS = {
+    "exact": "точное совпадение", "partial": "частичное совпадение",
+    "no": "нет совпадения", "na": "н/д", "range": "диапазон",
+}
+_OVERRIDE_ACTION_CODES = {"a": "accept", "s": "skip", "d": "delete"}  # "e" -> ✏, отдельный FSM-шаг
+
+
+def _fmt_change_value(value: object) -> str:
+    return html.escape(str(value), quote=False) if value is not None else "—"
+
+
+def changes_card_text(task_id: str, changes: list[dict], selection: dict) -> str:
+    """§3.4: список полей диффа отдельным сообщением (не в `details`) — кнопки не
+    привязаны к чанкам `_split_message`. Текущий выбор аналитика по каждому полю
+    (accept/skip/custom/delete) отражается прямо в тексте."""
+    lines = [f"🧾 Дифф по задаче {html.escape(task_id)} — отметьте поля для применения:"]
+    for idx, change in enumerate(changes):
+        field_name = html.escape(str(change.get("field", "?")), quote=False)
+        was = _fmt_change_value(change.get("was"))
+        now = _fmt_change_value(change.get("now"))
+        match_label = MATCH_LABELS.get(change.get("match"), change.get("match") or "—")
+        sel = selection.get(str(idx)) or {}
+        state_label = {
+            "accept": "✅ принято",
+            "skip": "⏭ пропущено",
+            "delete": "🗑 удалено",
+            "custom": f"✏ своё значение: {_fmt_change_value(sel.get('value'))}",
+        }.get(sel.get("action"), "не отмечено")
+        lines.append(
+            f"{idx + 1}. <b>{field_name}</b>: «{was}» → «{now}» ({match_label})\n   Выбор: {state_label}"
+        )
+    return "\n".join(lines)
+
+
+def changes_kb(task_id: str, changes: list[dict], selection: dict) -> InlineKeyboardMarkup:
+    """§3.2: чекбоксы ✅ принять / ⏭ пропустить / ✏ своё значение / 🗑 удалить на
+    каждое поле + «Применить выбранное». `callback_data` компактный —
+    `ovr:<task_id>:<idx>:<action>` (ревью: was/now в 64 байта не влезают, поэтому
+    адресация по индексу поля в уже сохранённом `SignalResult.payload`)."""
+    rows = []
+    for idx in range(len(changes)):
+        current = (selection.get(str(idx)) or {}).get("action")
+        rows.append([
+            InlineKeyboardButton(
+                text="✅" if current == "accept" else "☐ ✅",
+                callback_data=f"ovr:{task_id}:{idx}:a",
+            ),
+            InlineKeyboardButton(
+                text="⏭" if current == "skip" else "☐ ⏭",
+                callback_data=f"ovr:{task_id}:{idx}:s",
+            ),
+            InlineKeyboardButton(
+                text="✏" if current == "custom" else "☐ ✏",
+                callback_data=f"ovr:{task_id}:{idx}:e",
+            ),
+            InlineKeyboardButton(
+                text="🗑" if current == "delete" else "☐ 🗑",
+                callback_data=f"ovr:{task_id}:{idx}:d",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="Применить выбранное", callback_data=f"ovrap:{task_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def result_card(payload: dict, s: Signal) -> str:
     """Карточка по результату агента (SPEC раздел 3.4/3.6): статус, summary (+details,
     если есть). Решение о переходе в «Завершён» — за аналитиком, `/complete <id>`."""
@@ -1362,10 +1457,19 @@ async def scan_autoupdate_results(bot: Bot) -> int:
             continue
 
         signal_id = payload.get("signal_id")
+        task_id = payload.get("task_id")
         s = None
-        if isinstance(signal_id, int):
-            with get_session_factory()() as db:
+        with get_session_factory()() as db:
+            if isinstance(signal_id, int):
                 s = db.get(Signal, signal_id)
+            if task_id:
+                # SPEC_result_edit.md §3.4, ревью №3: сохраняем payload (в т.ч.
+                # changes[]) в БД до архивации файла — иначе дифф некуда применить
+                # после того, как results/<task_id>.json уедет в .processed/.
+                upsert_signal_result(
+                    db, task_id=task_id, signal_id=s.id if s is not None else None, payload=payload
+                )
+                db.commit()
         if s is None:
             # SPEC раздел 3.5: неизвестный signal_id — карточку не шлём, но архивируем,
             # иначе тот же файл пересканируется и логирует warning каждые 5 минут вечно.
@@ -1389,6 +1493,24 @@ async def scan_autoupdate_results(bot: Bot) -> int:
                         "автообновление: не удалось отправить карточку %s (кусок %d) uid=%s",
                         path, i, uid,
                     )
+        changes = payload.get("changes")
+        if changes and task_id:
+            # §3.2/3.4: чекбоксы — отдельным сообщением, не привязаны к чанкам
+            # details выше. selection читаем из только что сохранённого
+            # SignalResult (пусто при первом показе).
+            with get_session_factory()() as db:
+                sr = get_signal_result(db, task_id)
+                selection = (sr.selection if sr else None) or {}
+            changes_text = changes_card_text(task_id, changes, selection)
+            changes_markup = changes_kb(task_id, changes, selection)
+            for uid in get_settings().allowed_user_ids:
+                try:
+                    await bot.send_message(uid, changes_text, reply_markup=changes_markup)
+                except Exception:
+                    log.exception(
+                        "автообновление: не удалось отправить карточку диффа %s uid=%s", path, uid
+                    )
+
         # Архивируем даже при сбое отправки: повторная попытка дала бы дубли тем,
         # кому дошло; полный результат остаётся в .processed/ (SPEC, п.3 компромисса).
         archive_result(path, spool_dir)
@@ -1405,6 +1527,138 @@ async def _results_scan_loop(bot: Bot) -> None:
         except Exception:  # noqa: BLE001
             log.exception("results scan loop error")
         await asyncio.sleep(RESULTS_SCAN_INTERVAL)
+
+
+# --- SPEC_result_edit.md: чекбоксы диффа результата -> overlay measure_overrides ---
+
+
+@router.callback_query(F.data.startswith("ovr:"))
+async def on_override_button(cb: CallbackQuery, state: FSMContext) -> None:
+    """§3.2: ✅/⏭/🗑 отмечают выбор сразу (записывается в `SignalResult.selection`,
+    карточка перерисовывается); ✏ переводит в FSM-шаг ожидания текста
+    (`on_override_value`) — само значение появится в `selection` только после
+    ответа аналитика."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, task_id, idx_s, action = cb.data.split(":")
+    idx = int(idx_s)
+    with get_session_factory()() as db:
+        sr = get_signal_result(db, task_id)
+        if sr is None:
+            await cb.answer("Результат не найден (устарел?)", show_alert=True)
+            return
+        changes = (sr.payload or {}).get("changes") or []
+        if idx < 0 or idx >= len(changes):
+            await cb.answer("Поле не найдено", show_alert=True)
+            return
+
+        if action == "e":
+            await state.set_state(ResultEditFlow.ask_value)
+            await state.update_data(task_id=task_id, idx=idx)
+            await cb.message.answer(  # type: ignore[union-attr]
+                f"Введите новое значение для поля «{changes[idx].get('field')}»:"
+            )
+            await cb.answer()
+            return
+
+        selection = dict(sr.selection or {})
+        selection[str(idx)] = {"action": _OVERRIDE_ACTION_CODES[action]}
+        sr.selection = selection
+        db.commit()
+        text = changes_card_text(task_id, changes, selection)
+        markup = changes_kb(task_id, changes, selection)
+        await cb.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await cb.answer()
+
+
+@router.message(ResultEditFlow.ask_value)
+async def on_override_value(message: Message, state: FSMContext) -> None:
+    """Свободный текст после ✏ — своё значение поля (§3.2). Пустой ответ не
+    принимается: «своё значение» без текста неотличимо от 🗑 (используйте ту кнопку)."""
+    if not is_allowed(message.from_user.id):
+        return
+    data = await state.get_data()
+    task_id = data["task_id"]
+    idx = data["idx"]
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("Пустое значение не принимается. Введите текст, или используйте 🗑 на карточке.")
+        return
+    await state.clear()
+    with get_session_factory()() as db:
+        sr = get_signal_result(db, task_id)
+        if sr is None:
+            await message.answer("Результат не найден (устарел?).")
+            return
+        changes = (sr.payload or {}).get("changes") or []
+        if idx < 0 or idx >= len(changes):
+            await message.answer("Поле не найдено.")
+            return
+        selection = dict(sr.selection or {})
+        selection[str(idx)] = {"action": "custom", "value": value}
+        sr.selection = selection
+        db.commit()
+        text = changes_card_text(task_id, changes, selection)
+        markup = changes_kb(task_id, changes, selection)
+        await message.answer(text, reply_markup=markup)
+
+
+def _format_apply_result(result: ApplyResult) -> str:
+    lines = [f"✅ Применено полей: {len(result.applied_fields)} ({', '.join(result.applied_fields) or '—'})."]
+    if result.rejected_unwhitelisted:
+        lines.append(f"⚠️ Отклонены поля вне схемы KB: {', '.join(result.rejected_unwhitelisted)}")
+    if result.stale:
+        lines.append("⚠️ Запись менялась после этого диффа (другими полями) — проверьте результат.")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("ovrap:"))
+async def on_override_apply(cb: CallbackQuery) -> None:
+    """«Применить выбранное» (§3.4): одна транзакция на батч — конфликт (ревью №9)
+    откатывает всё и просит пересмотреть выбор; успех коммитит overrides и сразу
+    экспортирует KB (ревью №1, блокер), затем убирает клавиатуру карточки."""
+    if not is_allowed(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    _, task_id = cb.data.split(":")
+    kb_path = get_settings().benefits_knowledge_base_path
+    with get_session_factory()() as db:
+        sr = get_signal_result(db, task_id)
+        if sr is None:
+            await cb.answer("Результат не найден (устарел?)", show_alert=True)
+            return
+        try:
+            result = apply_selection(db, signal_result=sr, changed_by=cb.from_user.id, kb_path=kb_path)
+        except NoMeasureForTask as e:
+            db.rollback()
+            await cb.answer(str(e), show_alert=True)
+            return
+
+        if result.conflicts:
+            db.rollback()
+            details = "; ".join(
+                f"«{c.field}»: ожидалось «{c.expected_was}», сейчас «{c.actual_value}»"
+                for c in result.conflicts
+            )
+            await cb.message.answer(  # type: ignore[union-attr]
+                f"⚠️ Конфликт: поле уже менялось после этого диффа. {details}\n"
+                "Пересмотрите выбор и нажмите «Применить» ещё раз."
+            )
+            await cb.answer()
+            return
+
+        if not result.applied_fields:
+            db.commit()
+            await cb.answer("Нечего применять — отметьте хотя бы одно поле (✅/✏/🗑)", show_alert=True)
+            return
+
+        db.commit()
+        export_kb(db, kb_path=kb_path)
+
+    await cb.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
+    await cb.message.answer(_format_apply_result(result))  # type: ignore[union-attr]
+    await cb.answer()
 
 
 async def main() -> None:

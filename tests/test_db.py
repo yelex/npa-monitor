@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from db.enums import REGION_RF, EventType, Priority, RejectionReason, SignalCategory, SignalStatus
-from db.models import DocumentSeen, Signal, SourceState
+from db.models import DocumentSeen, MeasureOverride, Signal, SignalResult, SourceState
 from db.service import (
     InvalidStatusTransition,
     create_signal,
@@ -336,3 +336,85 @@ def test_source_state_upsert(session: Session):
     # db.types.UTCDateTime гарантирует tz-aware datetime на чтении даже на SQLite.
     assert state.last_success_at == later
     assert state.last_seen_publication_date == later.date()
+
+
+# --- docs/SPEC_result_edit.md: signal_results / measure_overrides ------------------
+
+
+def test_signal_result_task_id_unique_constraint_at_db_level(session: Session):
+    session.add(SignalResult(task_id="sig-1", payload={"status": "done"}))
+    session.commit()
+
+    session.add(SignalResult(task_id="sig-1", payload={"status": "done"}))
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_signal_result_signal_id_set_null_when_signal_deleted(session: Session):
+    signal = _make_signal(session)
+    session.add(SignalResult(task_id="sig-1", signal_id=signal.id, payload={"status": "done"}))
+    session.commit()
+
+    session.delete(signal)
+    session.commit()
+
+    result = session.query(SignalResult).filter_by(task_id="sig-1").one()
+    assert result.signal_id is None
+
+
+def test_measure_override_dedup_unique_constraint_at_db_level(session: Session):
+    session.add(
+        MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", old_value="195 000", new_value="200 000",
+            source="agent_diff", task_id="sig-1",
+        )
+    )
+    session.commit()
+
+    session.add(
+        MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", old_value="195 000", new_value="210 000",
+            source="agent_diff", task_id="sig-1",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_measure_override_allows_new_row_for_different_task_id(session: Session):
+    """Дедуп — по `(measure_id, field, task_id)` (§3.3), не по `(measure_id, field)`:
+    повторная правка того же поля от нового результата агента — новая строка (история)."""
+    session.add(
+        MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", old_value="195 000", new_value="200 000",
+            source="agent_diff", task_id="sig-1",
+        )
+    )
+    session.commit()
+
+    session.add(
+        MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", old_value="200 000", new_value="210 000",
+            source="agent_diff", task_id="sig-2",
+        )
+    )
+    session.commit()
+
+    assert session.query(MeasureOverride).filter_by(measure_id="00_svo_1", field="measure_sum").count() == 2
+
+
+def test_measure_override_signal_id_set_null_when_signal_deleted(session: Session):
+    signal = _make_signal(session)
+    session.add(
+        MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", new_value="200 000",
+            signal_id=signal.id, source="agent_diff", task_id="sig-1",
+        )
+    )
+    session.commit()
+
+    session.delete(signal)
+    session.commit()
+
+    override = session.query(MeasureOverride).filter_by(task_id="sig-1").one()
+    assert override.signal_id is None

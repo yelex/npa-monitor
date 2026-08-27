@@ -14,7 +14,9 @@ from db.measures import (
     _region_name,
     build_pool,
     cosine,
+    kb_field_names,
     lemmatized_bow,
+    load_raw_record,
     load_records,
     rank,
     score,
@@ -197,6 +199,27 @@ def test_matches_region_filters_by_resolved_name(kb_path) -> None:
 
     assert _matches_region(record_moscow, "Москва") is True
     assert _matches_region(record_rf, "Москва") is False
+
+
+def test_kb_field_names_excludes_measure_id_and_row_hash(kb_path) -> None:
+    """docs/SPEC_result_edit.md §3.3, ревью №7: whitelist для overlay — реальные ключи
+    KB минус идентификатор и вычисляемый хэш, не хардкод-список."""
+    fields = kb_field_names(kb_path)
+    assert "measure_id" not in fields
+    assert "row_hash" not in fields
+    assert "measure_name" in fields
+    assert "tags" in fields
+
+
+def test_load_raw_record_returns_full_row_by_measure_id(kb_path) -> None:
+    row = load_raw_record("00_svo_1", path=kb_path)
+    assert row is not None
+    assert row["measure_name"] == "Выплата при заключении контракта"
+    assert row["row_hash"] == "hash-svo-1"
+
+
+def test_load_raw_record_returns_none_for_unknown_measure_id(kb_path) -> None:
+    assert load_raw_record("no-such-id", path=kb_path) is None
 
 
 def test_all_kb_regions_have_regions_yaml_entry() -> None:

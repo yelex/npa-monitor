@@ -30,6 +30,7 @@ from db.enums import (
     SignalStatus,
     SignalType,
 )
+from db.models import MeasureOverride, SignalResult
 from db.service import create_signal, transition_status
 
 
@@ -1570,6 +1571,268 @@ async def test_scan_autoupdate_results_ignores_unknown_signal_id_and_archives_it
     assert sent_count == 0
     bot.send_message.assert_not_awaited()
     assert (_spool_dir() / "results" / ".processed" / "sig-999999.json").exists()
+
+
+# --- docs/SPEC_result_edit.md: write-back результатов агента (changes[] -> overlay) ---
+
+
+def _set_signal_measure(sig_id: int, *, measure_id: str, measure_row_hash: str | None) -> None:
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        signal = session.get(bot_main.Signal, sig_id)
+        signal.measure_id = measure_id
+        signal.measure_row_hash = measure_row_hash
+        session.commit()
+
+
+async def test_scan_autoupdate_results_saves_payload_to_signal_results_before_archiving() -> None:
+    sig_id = _make_in_progress_signal()
+    _write_result(
+        _spool_dir(), f"sig-{sig_id}.json",
+        {
+            "schema_version": 2, "task_id": f"sig-{sig_id}", "signal_id": sig_id,
+            "status": "done", "summary": "ok",
+        },
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main.scan_autoupdate_results(bot)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        sr = session.query(SignalResult).filter_by(task_id=f"sig-{sig_id}").one()
+        assert sr.signal_id == sig_id
+        assert sr.payload["summary"] == "ok"
+
+
+async def test_scan_autoupdate_results_sends_changes_card_with_checkboxes() -> None:
+    sig_id = _make_in_progress_signal()
+    _write_result(
+        _spool_dir(), f"sig-{sig_id}.json",
+        {
+            "schema_version": 3, "task_id": f"sig-{sig_id}", "signal_id": sig_id, "status": "done",
+            "summary": "изменение суммы",
+            "changes": [{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}],
+        },
+    )
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main.scan_autoupdate_results(bot)
+
+    # первый вызов — карточка details, второй — дифф с чекбоксами
+    assert bot.send_message.await_count == 2
+    changes_call = bot.send_message.await_args_list[1]
+    assert f"sig-{sig_id}" in changes_call.args[1]
+    assert "measure_sum" in changes_call.args[1]
+    kb = changes_call.kwargs["reply_markup"]
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert buttons[-1].callback_data == f"ovrap:sig-{sig_id}"
+    assert buttons[0].callback_data == f"ovr:sig-{sig_id}:0:a"
+
+
+def _make_signal_result_with_changes(
+    sig_id: int, *, changes: list[dict], selection: dict | None = None
+) -> str:
+    task_id = f"sig-{sig_id}"
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        payload = {
+            "schema_version": 3, "task_id": task_id, "signal_id": sig_id,
+            "status": "done", "changes": changes,
+        }
+        sr = bot_main.upsert_signal_result(session, task_id=task_id, signal_id=sig_id, payload=payload)
+        if selection is not None:
+            sr.selection = selection
+        session.commit()
+    return task_id
+
+
+async def test_on_override_button_accept_persists_selection() -> None:
+    sig_id = _make_in_progress_signal()
+    task_id = _make_signal_result_with_changes(
+        sig_id, changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}]
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovr:{task_id}:0:a"
+    cb.message.edit_text = AsyncMock()
+    cb.answer = AsyncMock()
+    state = FakeState()
+
+    await bot_main.on_override_button(cb, state)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        sr = bot_main.get_signal_result(session, task_id)
+        assert sr.selection == {"0": {"action": "accept"}}
+    assert "✅ принято" in cb.message.edit_text.await_args.args[0]
+
+
+async def test_on_override_button_edit_starts_fsm_and_prompts() -> None:
+    sig_id = _make_in_progress_signal()
+    task_id = _make_signal_result_with_changes(
+        sig_id, changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}]
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovr:{task_id}:0:e"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+    state = FakeState()
+
+    await bot_main.on_override_button(cb, state)
+
+    assert state.current_state == bot_main.ResultEditFlow.ask_value
+    data = await state.get_data()
+    assert data == {"task_id": task_id, "idx": 0}
+    assert "measure_sum" in cb.message.answer.await_args.args[0]
+
+
+async def test_on_override_value_stores_custom_selection() -> None:
+    sig_id = _make_in_progress_signal()
+    task_id = _make_signal_result_with_changes(
+        sig_id, changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}]
+    )
+    state = FakeState({"task_id": task_id, "idx": 0})
+    message = MagicMock()
+    message.from_user.id = 111
+    message.text = "205 000 ₽"
+    message.answer = AsyncMock()
+
+    await bot_main.on_override_value(message, state)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        sr = bot_main.get_signal_result(session, task_id)
+        assert sr.selection == {"0": {"action": "custom", "value": "205 000 ₽"}}
+    assert state.current_state is None  # state.clear() вызван
+
+
+async def test_on_override_value_rejects_empty_text() -> None:
+    sig_id = _make_in_progress_signal()
+    task_id = _make_signal_result_with_changes(
+        sig_id, changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}]
+    )
+    state = FakeState({"task_id": task_id, "idx": 0})
+    message = MagicMock()
+    message.from_user.id = 111
+    message.text = "   "
+    message.answer = AsyncMock()
+
+    await bot_main.on_override_value(message, state)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        sr = bot_main.get_signal_result(session, task_id)
+        assert sr.selection is None
+
+
+async def test_on_override_apply_happy_path_writes_override_exports_kb_and_clears_keyboard(
+    tmp_path, monkeypatch
+) -> None:
+    kb_path = tmp_path / "kb.json"
+    kb_row = {"measure_id": "00_svo_1", "measure_sum": "195 000 ₽", "row_hash": "hash-v1"}
+    kb_path.write_text(json.dumps([kb_row], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("BENEFITS_KNOWLEDGE_BASE_PATH", str(kb_path))
+    bot_main.get_settings.cache_clear()
+
+    sig_id = _make_in_progress_signal()
+    _set_signal_measure(sig_id, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    task_id = _make_signal_result_with_changes(
+        sig_id,
+        changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}],
+        selection={"0": {"action": "accept"}},
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovrap:{task_id}"
+    cb.message.edit_reply_markup = AsyncMock()
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_override_apply(cb)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        override = session.query(MeasureOverride).filter_by(measure_id="00_svo_1", field="measure_sum").one()
+        assert override.new_value == "200 000 ₽"
+    cb.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
+    assert "Применено полей: 1" in cb.message.answer.await_args.args[0]
+    rows = json.loads(kb_path.read_text(encoding="utf-8"))
+    assert rows[0]["measure_sum"] == "200 000 ₽"  # автоэкспорт применил overlay
+
+
+async def test_on_override_apply_conflict_blocks_write_and_does_not_export(tmp_path, monkeypatch) -> None:
+    kb_path = tmp_path / "kb.json"
+    kb_row = {"measure_id": "00_svo_1", "measure_sum": "195 000 ₽", "row_hash": "hash-v1"}
+    kb_path.write_text(json.dumps([kb_row], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("BENEFITS_KNOWLEDGE_BASE_PATH", str(kb_path))
+    bot_main.get_settings.cache_clear()
+
+    sig_id = _make_in_progress_signal()
+    _set_signal_measure(sig_id, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    task_id = _make_signal_result_with_changes(
+        sig_id,
+        changes=[{"field": "measure_sum", "was": "СТАРОЕ ЗНАЧЕНИЕ", "now": "200 000 ₽", "match": "exact"}],
+        selection={"0": {"action": "accept"}},
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovrap:{task_id}"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_override_apply(cb)
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        assert session.query(MeasureOverride).count() == 0
+    assert "Конфликт" in cb.message.answer.await_args.args[0]
+    assert json.loads(kb_path.read_text(encoding="utf-8"))[0]["measure_sum"] == "195 000 ₽"
+
+
+async def test_on_override_apply_nothing_selected_shows_alert() -> None:
+    sig_id = _make_in_progress_signal()
+    _set_signal_measure(sig_id, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    task_id = _make_signal_result_with_changes(
+        sig_id,
+        changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}],
+        selection={},
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovrap:{task_id}"
+    cb.answer = AsyncMock()
+
+    await bot_main.on_override_apply(cb)
+
+    cb.answer.assert_awaited_once()
+    assert cb.answer.await_args.kwargs.get("show_alert") is True
+
+
+async def test_measure_query_marks_overridden_measure_with_badge() -> None:
+    sig_id = _make_in_progress_signal(categories=[SignalCategory.SVO], region=REGION_RF)
+    state = FakeState({"sig_id": sig_id})
+    await _send_npa_link(sig_id, state, "skip")
+    await _confirm_categories(sig_id, state)
+    await _confirm_region(sig_id, state, "rf")
+    await _choose_signal_type(sig_id, state, "change")
+
+    factory = bot_main.get_session_factory()
+    with factory() as session:
+        session.add(MeasureOverride(
+            measure_id="00_svo_1", field="measure_sum", old_value="195 000 ₽", new_value="200 000 ₽",
+            source="agent_diff", task_id="sig-other",
+        ))
+        session.commit()
+
+    await _search_measure(sig_id, state, "выплата при заключении контракта")
+
+    data = await state.get_data()
+    top = next(c for c in data["measure_candidates"] if c["measure_id"] == "00_svo_1")
+    assert "правлено" in top["label"]
 
 
 async def test_cmd_today_ignores_unauthorized_user() -> None:
