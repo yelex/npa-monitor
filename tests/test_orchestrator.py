@@ -46,7 +46,7 @@ def test_process_source_creates_signal_for_relevant_publication(
     publications = [
         _pub(
             "sfr.gov.ru/press_center/news",
-            "постановление ветеран боевых действий выплата новый",
+            "постановление ветеран боевых действий выплата новый принят",
             "https://sfr.gov.ru/press_center/news/1",
             published_at=NOW,
         )
@@ -82,11 +82,57 @@ def test_process_source_skips_irrelevant_publication(session: Session, classifie
     assert session.query(Signal).count() == 0
 
 
+def test_process_source_skips_review_without_event_marker(session: Session, classifier: Classifier) -> None:
+    # docs/SPEC_no_reviews_no_stale_reminders.md, п.1: релевантная (ЖС + тематический
+    # блок совпали), но без маркера события 5.4 — обзор/агрегатор, не конкретная
+    # новость. Сигнал не создаётся, публикация не копится в БД как NEW.
+    publications = [
+        _pub(
+            "sfr.gov.ru/press_center/news",
+            "обзор мер поддержки ветеранов боевых действий: выплаты и льготы",
+            "https://sfr.gov.ru/n/review-1",
+            published_at=NOW,
+        )
+    ]
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 0
+    assert result.reviews == 1
+    assert result.irrelevant == 0
+    assert session.query(Signal).count() == 0
+
+
+def test_process_source_creates_signal_for_review_with_event_marker(
+    session: Session, classifier: Classifier
+) -> None:
+    # Тот же текст, что и выше, но с маркером события ("принят") — уже не обзор,
+    # сигнал создаётся как обычно.
+    publications = [
+        _pub(
+            "sfr.gov.ru/press_center/news",
+            "постановление о мерах поддержки ветеранов боевых действий принято",
+            "https://sfr.gov.ru/n/event-1",
+            published_at=NOW,
+        )
+    ]
+    spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.reviews == 0
+    assert session.query(Signal).count() == 1
+
+
 def test_process_source_dedups_on_second_run(session: Session, classifier: Classifier) -> None:
     publications = [
         _pub(
             "sfr.gov.ru/press_center/news",
-            "постановление ветеран боевых действий выплата",
+            "постановление ветеран боевых действий выплата принят",
             "https://sfr.gov.ru/n/3",
             published_at=NOW,
         )
@@ -112,7 +158,7 @@ def test_process_source_dedups_by_canonicalized_url_across_pages(
     page1 = [
         _pub(
             "sfr.gov.ru/press_center/news",
-            "постановление ветеран боевых действий выплата",
+            "постановление ветеран боевых действий выплата принят",
             "http://sfr.gov.ru/n/4?index=9",
             published_at=NOW,
         )
@@ -120,7 +166,7 @@ def test_process_source_dedups_by_canonicalized_url_across_pages(
     page2 = [
         _pub(
             "sfr.gov.ru/press_center/news",
-            "постановление ветеран боевых действий выплата",
+            "постановление ветеран боевых действий выплата принят",
             "https://www.sfr.gov.ru/n/4?index=10",
             published_at=NOW,
         )
@@ -161,7 +207,7 @@ def test_process_source_dedups_by_exact_title_across_different_urls(
     # PLAN.md Фаза 9 п.2 / docs/SPEC_content_dedup.md: та же публикация под другим
     # URL/поддоменом (не схлопывается canonicalize_url) с дословно тем же заголовком —
     # второй сигнал не создаётся, даже без LLM (точное совпадение заголовка).
-    title = "постановление ветеран боевых действий выплата"
+    title = "постановление ветеран боевых действий выплата принят"
     page1 = [_pub("sfr.gov.ru/press_center/news", title, "https://a.sfr.gov.ru/n/5", published_at=NOW)]
     page2 = [_pub("sfr.gov.ru/press_center/news", title, "https://b.sfr.gov.ru/n/6", published_at=NOW)]
     pages = {1: page1, 2: page2}
@@ -181,8 +227,8 @@ def test_process_source_dedups_by_exact_title_across_different_urls(
 
 
 def test_process_source_dedups_paraphrased_title_via_llm(session: Session, classifier: Classifier) -> None:
-    original = "постановление ветеран боевых действий новая выплата"
-    paraphrased = "новая выплата ветеранам боевых действий постановление"
+    original = "постановление ветеран боевых действий новая выплата принят"
+    paraphrased = "новая выплата ветеранам боевых действий постановление принят"
     page1 = [_pub("sfr.gov.ru/press_center/news", original, "https://a.sfr.gov.ru/n/7", published_at=NOW)]
     page2 = [
         _pub("sfr.gov.ru/press_center/news", paraphrased, "https://b.sfr.gov.ru/n/8", published_at=NOW)
@@ -205,8 +251,8 @@ def test_process_source_creates_second_signal_when_llm_unavailable_for_paraphras
 ) -> None:
     # Без LLM (не сконфигурирован/недоступен) переформулированный заголовок не считается
     # дублем — деградация до точной нормализации, не полный отказ от дедупа.
-    original = "постановление ветеран боевых действий новая выплата"
-    paraphrased = "новая выплата ветеранам боевых действий постановление"
+    original = "постановление ветеран боевых действий новая выплата принят"
+    paraphrased = "новая выплата ветеранам боевых действий постановление принят"
     page1 = [_pub("sfr.gov.ru/press_center/news", original, "https://a.sfr.gov.ru/n/9", published_at=NOW)]
     page2 = [
         _pub("sfr.gov.ru/press_center/news", paraphrased, "https://b.sfr.gov.ru/n/10", published_at=NOW)
@@ -232,7 +278,7 @@ def test_process_source_does_not_recreate_signal_for_url_rejected_earlier(
     # Этот тест фиксирует явным контрактом то, что раньше было верно случайно:
     # documents_seen не смотрит на Signal.status — отклонённый URL не создаёт новый
     # сигнал при повторном обходе, не только «просто дубликат».
-    title = "постановление ветеран боевых действий выплата"
+    title = "постановление ветеран боевых действий выплата принят"
     url = "https://sfr.gov.ru/n/rejected-1"
     publications = [_pub("sfr.gov.ru/press_center/news", title, url, published_at=NOW)]
     spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
@@ -289,13 +335,13 @@ def test_process_source_stops_pagination_at_window_start(session: Session, class
 
     fresh = _pub(
         "sfr.gov.ru/press_center/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://sfr.gov.ru/n/fresh",
         published_at=NOW,
     )
     stale = _pub(
         "sfr.gov.ru/press_center/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://sfr.gov.ru/n/stale",
         published_at=window_start - dt.timedelta(hours=1),
     )
@@ -328,13 +374,13 @@ def test_process_source_stops_scanning_page_at_first_stale_item(
 
     fresh = _pub(
         "sfr.gov.ru/press_center/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://sfr.gov.ru/n/fresh",
         published_at=NOW,
     )
     stale = _pub(
         "sfr.gov.ru/press_center/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://sfr.gov.ru/n/stale",
         published_at=window_start - dt.timedelta(hours=1),
     )
@@ -343,7 +389,7 @@ def test_process_source_stops_scanning_page_at_first_stale_item(
     # "continue вместо break": будь она, эта публикация тоже создала бы сигнал.
     fresh_after_stale = _pub(
         "sfr.gov.ru/press_center/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://sfr.gov.ru/n/fresh-after-stale",
         published_at=NOW,
     )
@@ -393,7 +439,7 @@ def test_process_source_stops_pagination_when_page_fully_undated(
     окно — обход останавливается (docs/SPEC_stale_publications_filter.md)."""
     undated = _pub(
         "kremlin.ru/acts/news",
-        "постановление ветеран боевых действий выплата",
+        "постановление ветеран боевых действий выплата принят",
         "https://kremlin.ru/acts/news/1",
         published_at=None,
     )
@@ -459,7 +505,7 @@ def test_run_all_continues_after_one_source_fails(session: Session) -> None:
         return [
             _pub(
                 "mintrud.gov.ru/docs",
-                "приказ инвалид пособие",
+                "приказ инвалид пособие принят",
                 "https://mintrud.gov.ru/docs/1",
                 published_at=NOW,
             )

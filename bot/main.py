@@ -1209,33 +1209,6 @@ async def on_measure_button(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
 
 
-# --- reminder ------------------------------------------------------------------
-
-
-async def remind_stale(bot: Bot) -> None:
-    """Сигналы >3 дней в «В работе» → напоминание (AGENTS.md раздел 12)."""
-    # tz-aware (UTC) — db.types.UTCDateTime требует aware datetime на входе.
-    threshold = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
-    db_factory = get_session_factory()
-    with db_factory() as db:
-        stale = db.query(Signal).filter(
-            Signal.status == SignalStatus.IN_PROGRESS, Signal.updated_at < threshold
-        ).all()
-    for s in stale:
-        title = html.escape(s.title or "(без названия)", quote=False)
-        for uid in get_settings().allowed_user_ids:
-            await bot.send_message(uid, f"⏰ Сигнал {s.id} в работе больше 3 дней: {title}")
-
-
-async def _reminder_loop(bot: Bot) -> None:
-    while True:
-        try:
-            await remind_stale(bot)
-        except Exception:  # noqa: BLE001
-            log.exception("reminder loop error")
-        await asyncio.sleep(6 * 3600)
-
-
 # --- утренняя сводка (рассылка) -------------------------------------------------
 
 DIGEST_HOUR = 8  # AGENTS.md раздел 5: ~08:00, через ~2ч после обхода парсером (06:00)
@@ -1676,13 +1649,11 @@ async def main() -> None:
     # SPEC раздел 3.2: сверка spool при старте — до начала поллинга.
     with get_session_factory()() as db:
         _reconcile_spool_tasks(db, _autoupdate_client)
-    reminder = asyncio.create_task(_reminder_loop(bot))
     digest = asyncio.create_task(_digest_loop(bot))
     results_scan = asyncio.create_task(_results_scan_loop(bot))
     try:
         await dp.start_polling(bot)
     finally:
-        reminder.cancel()
         digest.cancel()
         results_scan.cancel()
 

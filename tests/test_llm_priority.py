@@ -265,7 +265,7 @@ def _pub(url: str, title: str) -> Publication:
 def test_run_all_with_llm_client_none_leaves_priority_unchanged(session: Session) -> None:
     # regex-приоритет: маркер документа есть ("постановление"), слов приоритета нет,
     # регион федеральный (sfr.gov.ru) -> MEDIUM.
-    publications = [_pub("https://sfr.gov.ru/n/100", "постановление ветеран боевых действий выплата")]
+    publications = [_pub("https://sfr.gov.ru/n/100", "постановление ветеран боевых действий выплата принят")]
     spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
 
     results = run_all(session, specs=[spec], now=NOW, llm_client=None)
@@ -276,7 +276,7 @@ def test_run_all_with_llm_client_none_leaves_priority_unchanged(session: Session
 
 
 def test_run_all_log_only_mode_does_not_change_priority_in_db(session: Session) -> None:
-    publications = [_pub("https://sfr.gov.ru/n/101", "постановление ветеран боевых действий выплата")]
+    publications = [_pub("https://sfr.gov.ru/n/101", "постановление ветеран боевых действий выплата принят")]
     spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
 
     class _DynamicLLMClient:
@@ -294,7 +294,7 @@ def test_run_all_log_only_mode_does_not_change_priority_in_db(session: Session) 
 
 
 def test_run_all_apply_mode_changes_priority_in_db(session: Session) -> None:
-    publications = [_pub("https://sfr.gov.ru/n/102", "постановление ветеран боевых действий выплата")]
+    publications = [_pub("https://sfr.gov.ru/n/102", "постановление ветеран боевых действий выплата принят")]
     spec = SourceSpec("sfr.gov.ru/press_center/news", lambda page=1: publications if page == 1 else [])
 
     class _DynamicLLMClient:

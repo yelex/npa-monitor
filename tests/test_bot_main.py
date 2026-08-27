@@ -497,44 +497,6 @@ async def test_postponed_signal_can_be_rejected_via_reject_flow() -> None:
     assert _get_status(sig_id) == SignalStatus.REJECTED
 
 
-# --- Регрессии: tz-aware datetime сравнения ---
-
-
-async def test_remind_stale_does_not_crash_on_tz_comparison() -> None:
-    """Регрессия: naive datetime.now() против tz-aware UTCDateTime поднимал ValueError."""
-    _make_signal()
-    bot = AsyncMock()
-
-    await bot_main.remind_stale(bot)  # не должно поднимать исключение
-
-
-async def test_remind_stale_reminds_for_signal_stuck_over_3_days_in_progress() -> None:
-    """AGENTS.md раздел 12: сигнал >3 дней в «В работе» -> напоминание."""
-    sig_id = _make_in_progress_signal()
-    factory = bot_main.get_session_factory()
-    with factory() as session:
-        signal = session.get(bot_main.Signal, sig_id)
-        signal.updated_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=4)
-        session.commit()
-    bot = AsyncMock()
-
-    await bot_main.remind_stale(bot)
-
-    bot.send_message.assert_awaited_once()
-    uid, text = bot.send_message.await_args.args
-    assert uid == 111
-    assert str(sig_id) in text
-
-
-async def test_remind_stale_skips_signal_updated_recently() -> None:
-    _make_in_progress_signal()  # updated_at ~ сейчас, порог не пройден
-
-    bot = AsyncMock()
-    await bot_main.remind_stale(bot)
-
-    bot.send_message.assert_not_awaited()
-
-
 async def test_cmd_stats_reports_counts_by_status_for_real_signals() -> None:
     _make_signal()  # статус «Новый»
     _make_in_progress_signal()

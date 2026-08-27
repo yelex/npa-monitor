@@ -43,7 +43,7 @@ async def test_happy_path_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     # --- 1. Парсер: обход источника, создание сигнала ---
     publication = Publication(
         source_key="sfr.gov.ru/press_center/news",
-        title="постановление ветеран боевых действий выплата новый",
+        title="постановление ветеран боевых действий выплата новый принят",
         url="https://sfr.gov.ru/press_center/news/happy-path",
         published_at=NOW,
     )

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from db.catalog import all_domains
-from db.enums import Priority
+from db.enums import EventType, Priority
 from db.service import link_document_to_signal, recent_documents_with_titles, register_document_seen
 from parser.classifier import Classifier
 from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_title
@@ -64,6 +64,7 @@ class SourceRunResult:
     duplicates: int = 0
     irrelevant: int = 0
     excluded: int = 0
+    reviews: int = 0
     error: str | None = None
     # PLAN.md Фаза 11 / docs/SPEC_llm_priority.md: id сигналов этого источника с
     # regex-приоритетом MEDIUM/LOW, созданных за этот прогон — материал для
@@ -225,6 +226,14 @@ def _process_publication(
     trace = classifier.explain(pub)
     log.debug("  %s", trace.format())
 
+    # docs/SPEC_no_reviews_no_stale_reminders.md, п.1: обзоры/агрегаторы (нет маркера
+    # события 5.4, `detect_event_type` вернул REVIEW) не содержат конкретики по
+    # отдельной новости — сигнал не создаётся, публикация просто пропускается.
+    if trace.result.is_relevant and trace.result.event_type == EventType.REVIEW:
+        result.reviews += 1
+        log.debug("  отфильтровано: обзор (без конкретики)")
+        return
+
     signal = build_signal(session, pub, trace.result)
     if signal is not None:
         # Побочная находка при добавлении content-дедупа (docs/SPEC_content_dedup.md):
@@ -312,13 +321,14 @@ def run_all(
         session.commit()
         results.append(result)
         log.info(
-            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d",
+            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d обзоров=%d",
             result.source_key,
             result.ok,
             result.new_signals,
             result.duplicates,
             result.irrelevant,
             result.excluded,
+            result.reviews,
         )
 
     medium_low_ids = [sid for result in results for sid in result.medium_low_signal_ids]

@@ -320,7 +320,8 @@ Docker Compose на VPS.
       `_reminder_loop` (раз в 6 часов). **Баг при интеграции:** сравнение naive
       `datetime.now()` с tz-aware полями БД (после `db/types.py::UTCDateTime`, Фаза 3)
       — `ValueError` при каждом вызове; исправлено (`dt.datetime.now(dt.timezone.utc)`),
-      как и аналогичная строка в `cmd_stats`.
+      как и аналогичная строка в `cmd_stats`. **Удалено 2026-08-28** — см. «Внеплановый
+      фикс — отсечение обзоров + отключение напоминаний» ниже.
 - [x] Команда `/complete <id>` — «Передан агенту» → «Завершён» после проверки экспертом
       результата агента. Ручная команда (не автоматический переход) — с появлением
       `_results_scan_loop` (`AutoUpdateAgentClient`, см. ниже) есть карточка «агент
@@ -347,8 +348,8 @@ Message/CallbackQuery/FSMContext — без реального `Bot`/`Dispatcher
       9 тестов (`tests/test_orchestrator.py`).
 - [x] Отправка утренней сводки ~08:00 — `bot/main.py::_digest_loop`/`send_digest`,
       фоновая задача внутри самого бота (не отдельный cron), аналогично уже имевшемуся
-      `_reminder_loop`. Логика подбора сигналов вынесена в `_digest_signals`, общая с
-      командой `/digest`.
+      на тот момент `_reminder_loop` (удалён 2026-08-28). Логика подбора сигналов
+      вынесена в `_digest_signals`, общая с командой `/digest`.
 - [x] Сквозной прогон happy path (раздел 11 AGENTS.md) — `tests/test_happy_path.py`:
       парсер создаёт сигнал → сводка → ✅ Взять в работу → ссылка на НПА → «Передан
       агенту» → `/complete` → «Завершён», с проверкой полной истории переходов и того,
@@ -923,6 +924,21 @@ RU-прокси, известная проблема) это был 100%-й fals
   NEW/POSTPONED) — выглядит как «ничего не было».
 - `/reopen` работает только из REJECTED; из IN_PROGRESS в NEW перехода нет (так задумано,
   обходной путь `/reject` → `/reopen`).
+
+## Внеплановый фикс — отсечение обзоров + отключение напоминаний ✅ (2026-08-28)
+
+Решение владельца 2026-08-28, спека `docs/SPEC_no_reviews_no_stale_reminders.md`:
+
+- [x] Обзоры/агрегаторы (`EventType.REVIEW`, нет маркера события 5.4) больше не
+      создают сигнал — фильтр в `parser/orchestrator.py::_process_publication`, до
+      `build_signal`; отдельного блэклиста доменов не вводили (фильтр по event_type
+      уже покрывает агрегаторы `parser/sources/other.py`). Новый счётчик
+      `SourceRunResult.reviews`, лог «отфильтровано: обзор (без конкретики)». Тесты —
+      `tests/test_orchestrator.py::test_process_source_skips_review_without_event_marker`/
+      `test_process_source_creates_signal_for_review_with_event_marker`.
+- [x] Напоминание «сигнал >3 дней в работе» (Фаза 5, `remind_stale`/`_reminder_loop`,
+      раз в 6 часов) удалено целиком — код в `bot/main.py`, запуск в `main()`, тесты в
+      `tests/test_bot_main.py`. AGENTS.md раздел 12/14 обновлены.
 
 ## Пендинги (из итерации 27.08)
 
