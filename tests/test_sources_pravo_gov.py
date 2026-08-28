@@ -7,7 +7,7 @@ import datetime as dt
 import httpx
 import pytest
 
-from parser.sources.pravo_gov import SEARCH_URL, SOURCE_KEY, fetch_documents
+from parser.sources.pravo_gov import MOSCOW_TZ, SEARCH_URL, SOURCE_KEY, fetch_documents, select_period
 
 REAL_SEARCH_FRAGMENT = """
 <div class="documents-container"><div class="documents-table">
@@ -65,3 +65,40 @@ def test_fetch_documents_parses_real_markup_fragment(monkeypatch: pytest.MonkeyP
 def test_fetch_documents_uses_ru_proxy_access() -> None:
     with pytest.raises(ValueError, match="RU_PROXY_URL"):
         fetch_documents(ru_proxy_url=None)
+
+
+# docs/SPEC_pravo_gov_pagination_depth.md, п.2 + ревью п.1: адаптивный period по размеру
+# окна пропуска, а для окон <=1 дня — ещё и по тому, пересекает ли окно полночь МСК
+# (`periodType=daily` источника фильтрует строго по календарному дню, не "24 часа
+# от now"). NOW выбран не на полуночи, чтобы "окно внутри суток" и "окно короче суток,
+# но с другой календарной датой" были различимыми сценариями.
+NOW = dt.datetime(2026, 8, 28, 20, 0, tzinfo=MOSCOW_TZ)  # 28.08, 20:00 МСК
+
+
+@pytest.mark.parametrize(
+    ("window_start", "now", "expected_period"),
+    [
+        (NOW, NOW, "daily"),  # обычный ежедневный прогон, окно = 0
+        # окно 18 часов, но целиком внутри сегодняшнего календарного дня МСК — ещё daily
+        (NOW - dt.timedelta(hours=18), NOW, "daily"),
+        # ревью п.1: окно короче суток (2 часа), но пересекает полночь МСК — вчерашние
+        # публикации физически отсутствуют в daily-листинге, нужен weekly, а не daily
+        (
+            dt.datetime(2026, 8, 27, 23, 0, tzinfo=MOSCOW_TZ),
+            dt.datetime(2026, 8, 28, 1, 0, tzinfo=MOSCOW_TZ),
+            "weekly",
+        ),
+        # ровно сутки назад — при любом времени суток это уже другая календарная дата
+        # МСК (пересекает полночь), поэтому weekly, а не daily, как было бы по одному
+        # только порогу span<=1 день
+        (NOW - dt.timedelta(days=1), NOW, "weekly"),
+        (NOW - dt.timedelta(days=1, hours=1), NOW, "weekly"),  # чуть больше суток — weekly
+        (NOW - dt.timedelta(days=7), NOW, "weekly"),  # граница: ровно 7 дней — ещё weekly
+        (NOW - dt.timedelta(days=7, hours=1), NOW, "monthly"),  # больше недели — monthly
+        (NOW - dt.timedelta(days=30), NOW, "monthly"),
+    ],
+)
+def test_select_period_by_window_size(
+    window_start: dt.datetime, now: dt.datetime, expected_period: str
+) -> None:
+    assert select_period(window_start, now) == expected_period

@@ -47,6 +47,28 @@ from parser.state import fetch_window_start, mark_source_processed
 log = logging.getLogger(__name__)
 
 MAX_PAGES_PER_SOURCE = 5  # защита от бесконечной пагинации; окна обхода небольшие
+# docs/SPEC_pravo_gov_pagination_depth.md, п.1: pravo_gov отдаёт ~2500 док/неделю
+# (~84 стр. по 30 позиций) — общий предохранитель в 5 страниц физически недосягаем до
+# начала окна поиска при catch-up на несколько дней. Останов по-прежнему в первую
+# очередь по дате (ниже), счётчик — только верхняя защита от зависшей пагинации.
+PRAVO_GOV_MAX_PAGES = 100  # фолбэк, если period почему-то не резолвится (не должно случаться)
+# docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: единый потолок в 100 страниц был
+# откалиброван по живой проверке `weekly` (~2520 док = 84 стр.) и подставлялся для ЛЮБОГО
+# period, включая `monthly` — объём которого живьём не проверялся. Расчёт от того же
+# живого числа: ~2520 док/неделю ≈ 360 док/день ≈ 12 стр./день при 30 док/стр. — отсюда
+# per-period потолки ниже (тот же запас ×~1.2, что и у `weekly`: 84 факт. стр. → 100).
+# `monthly` — расчётная, не живая величина (пункт открытого вопроса AGENTS.md №3/№7:
+# перепроверить вживую при появлении доступа) — 30 дн. × 12 стр./день ≈ 360, потолок 450.
+# Даже если оценка ошибочна в меньшую сторону, самоисцеление есть: не покрытое окно не
+# отмечается обработанным (см. process_source), а при следующем суточном прогоне span
+# только растёт — `daily`/`weekly` эскалируются в `weekly`/`monthly` автоматически
+# (parser/sources/pravo_gov.py::select_period), не залипая на заниженном потолке навсегда.
+PRAVO_GOV_MAX_PAGES_BY_PERIOD = {
+    "daily": 20,  # запас над расчётными ~12 стр./день — daily теперь выбирается только
+    # для окна внутри одного календарного дня МСК (ревью п.1), обычно куда меньше суток
+    "weekly": 100,  # как раньше — покрывает живьём проверенные ~2520 док (84 стр.)
+    "monthly": 450,  # расчётная оценка (см. выше), не проверена вживую
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +76,23 @@ class SourceSpec:
     source_key: str
     fetch_page: Callable[..., list[Publication]]  # fetch_page(page=N) -> [Publication, ...]
     paginated: bool = True  # False — источник без пагинации (напр. RSS), одна страница
+    max_pages: int = MAX_PAGES_PER_SOURCE  # используется, если max_pages_by_period не задан
+    # или не содержит текущий period (для source без per-period объёма — как раньше).
+    # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: единый max_pages не различал
+    # period — daily/weekly/monthly у pravo_gov отличаются по объёму на порядок. Если
+    # задан, потолок берётся по текущему period (пересчитывается при фолбэке period,
+    # см. process_source) — None у источников без понятия периода.
+    max_pages_by_period: dict[str, int] | None = None
+    # docs/SPEC_pravo_gov_pagination_depth.md, п.1: допуск на неидеальную сортировку
+    # листинга источника — публикация старше окна на величину до допуска ещё не
+    # останавливает обход (0 для большинства источников — сохраняет прежнее поведение).
+    window_tolerance: dt.timedelta = dt.timedelta(0)
+    # docs/SPEC_pravo_gov_pagination_depth.md, п.2: адаптивный periodType по размеру
+    # окна пропуска, чистая функция даты — None у источников без понятия периода.
+    resolve_period: Callable[[dt.datetime, dt.datetime], str] | None = None
+    # docs/SPEC_pravo_gov_pagination_depth.md, п.3: фолбэк периода, если первая страница
+    # с выбранным period пуста (напр. "daily" в моменте ничего не отдал) — {period: fallback}.
+    period_fallback: dict[str, str] | None = None
 
 
 @dataclasses.dataclass
@@ -82,7 +121,18 @@ def build_source_specs(*, ru_proxy_url: str | None = None) -> list[SourceSpec]:
         SourceSpec(msupport_dszn.SOURCE_KEY, msupport_dszn.fetch_news),
         SourceSpec(
             pravo_gov.SOURCE_KEY,
-            lambda page=1: pravo_gov.fetch_documents(page=page, ru_proxy_url=ru_proxy_url),
+            lambda page=1, period="daily": pravo_gov.fetch_documents(
+                page=page, period=period, ru_proxy_url=ru_proxy_url
+            ),
+            max_pages=PRAVO_GOV_MAX_PAGES,
+            max_pages_by_period=PRAVO_GOV_MAX_PAGES_BY_PERIOD,
+            window_tolerance=dt.timedelta(days=1),
+            resolve_period=pravo_gov.select_period,
+            # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: цепочка эскалации, не
+            # только daily->weekly — тот же семантический разрыв "period пуст на первой
+            # странице, хотя окно непусто" в принципе может повториться и на weekly
+            # (после простоя >7 дней, где weekly сама по себе оказалась бы неполной).
+            period_fallback={"daily": "weekly", "weekly": "monthly"},
         ),
         SourceSpec(
             kremlin.SOURCE_KEY, lambda page=1: kremlin.fetch_news(page=page, ru_proxy_url=ru_proxy_url)
@@ -116,15 +166,49 @@ def process_source(
     window_start = fetch_window_start(session, spec.source_key, now=now)
 
     result = SourceRunResult(source_key=spec.source_key, ok=True)
+    # docs/SPEC_pravo_gov_pagination_depth.md, п.3: период выбирается один раз на весь
+    # прогон источника (не пересчитывается по страницам — иначе индекс страницы плыл бы
+    # относительно уже пройденных, если бы период сменился в середине пагинации).
+    period = spec.resolve_period(window_start, now) if spec.resolve_period is not None else None
+    # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: потолок страниц теперь
+    # per-period (SourceSpec.max_pages_by_period) — daily/weekly/monthly у pravo_gov
+    # отличаются по объёму на порядок, единый потолок либо избыточен для daily, либо
+    # недостаточен для monthly. Пересчитывается при фолбэке period (ниже), т.к. смена
+    # period меняет и допустимый объём.
+    max_pages = (spec.max_pages_by_period or {}).get(period, spec.max_pages) if period is not None else spec.max_pages
+    window_covered = True  # остаётся True при явном break, False — если цикл исчерпал
+    # max_pages, не подтвердив достижение начала окна (см. п.1 спеки)
     try:
-        for page in range(1, MAX_PAGES_PER_SOURCE + 1):
-            publications = spec.fetch_page(page=page)
+        page = 1
+        while page <= max_pages:
+            fetch_kwargs: dict = {"page": page}
+            if period is not None:
+                fetch_kwargs["period"] = period
+            publications = spec.fetch_page(**fetch_kwargs)
+
+            # docs/SPEC_pravo_gov_pagination_depth.md, п.3: пустая первая страница на
+            # текущем period — не обязательно «публикаций нет», может быть, что period
+            # ещё не проиндексирован источником (напр. daily в моменте пуст, хотя
+            # публикации за сегодня уже есть в weekly) — фолбэк, не потеряв день молча.
+            if not publications and page == 1 and period is not None and spec.period_fallback:
+                fallback_period = spec.period_fallback.get(period)
+                if fallback_period is not None:
+                    log.info(
+                        "источник %s: period=%s пуст на первой странице, фолбэк на period=%s",
+                        spec.source_key,
+                        period,
+                        fallback_period,
+                    )
+                    period = fallback_period
+                    max_pages = (spec.max_pages_by_period or {}).get(period, spec.max_pages)
+                    publications = spec.fetch_page(page=page, period=period)
+
             if not publications:
                 break
 
             reached_window_start = False
             for pub in publications:
-                if pub.published_at is not None and pub.published_at < window_start:
+                if pub.published_at is not None and pub.published_at < window_start - spec.window_tolerance:
                     # Публикации идут от новых к старым — как только встретили одну
                     # старше окна, все следующие в этой странице тоже старше, дальше
                     # не проверяем (не только эту страницу — весь источник, ниже).
@@ -154,6 +238,23 @@ def process_source(
 
             if reached_window_start or all_undated or not spec.paginated:
                 break
+
+            page += 1
+        else:
+            # docs/SPEC_pravo_gov_pagination_depth.md, п.1: предохранитель max_pages
+            # сработал раньше, чем обход подтвердил достижение начала окна — часть окна
+            # может остаться необойдённой, источник НЕ отмечается обработанным ниже
+            # (доверстывание подхватит его на следующем прогоне с тем же window_start).
+            window_covered = False
+            log.warning(
+                "источник %s: достигнут предохранитель страниц (%d, period=%s) раньше "
+                "начала окна поиска (%s) — источник не отмечен обработанным, "
+                "доверстывание при следующем прогоне",
+                spec.source_key,
+                max_pages,
+                period,
+                window_start,
+            )
     except SourceUnavailable as exc:
         # AGENTS.md раздел 12: «Источник недоступен — 3 попытки, затем пропуск до
         # следующего цикла» — fetch() их уже сделал; здесь просто не отмечаем источник
@@ -170,7 +271,8 @@ def process_source(
         log.exception("неожиданная ошибка при обходе источника %s, пропуск", spec.source_key)
         return SourceRunResult(source_key=spec.source_key, ok=False, error=str(exc))
 
-    mark_source_processed(session, spec.source_key, success_at=now)
+    if window_covered:
+        mark_source_processed(session, spec.source_key, success_at=now)
     return result
 
 

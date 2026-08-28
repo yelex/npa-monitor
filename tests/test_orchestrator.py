@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from db.enums import RejectionReason, SignalStatus
-from db.models import DocumentSeen, Signal
+from db.models import DocumentSeen, Signal, SourceState
 from db.service import transition_status
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import Classifier
@@ -539,3 +539,234 @@ def test_non_paginated_spec_fetches_only_once(session: Session, classifier: Clas
     session.commit()
 
     assert call_count == 1
+
+
+# docs/SPEC_pravo_gov_pagination_depth.md: предохранитель по страницам (max_pages
+# per-source), адаптивный period, фолбэк daily->weekly, источник не отмечается
+# обработанным, пока обход не подтвердит покрытие окна.
+
+
+def test_process_source_uses_per_source_max_pages_override(session: Session, classifier: Classifier) -> None:
+    """Источник с повышенным `max_pages` (как pravo_gov) должен обойти больше страниц,
+    чем дефолтный предохранитель в 5, прежде чем остановиться."""
+    call_count = 0
+
+    def fetch_page(page: int = 1) -> list[Publication]:
+        nonlocal call_count
+        call_count += 1
+        if page > 8:
+            return []
+        return [
+            _pub(
+                "publication.pravo.gov.ru",
+                f"постановление №{page} ветеран боевых действий выплата принят",
+                f"http://publication.pravo.gov.ru/document/{page}",
+                published_at=NOW,
+            )
+        ]
+
+    spec = SourceSpec("publication.pravo.gov.ru", fetch_page, max_pages=20)
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert call_count == 9  # страницы 1..8 с данными + пустая 9-я
+    assert result.new_signals == 8
+    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно покрыто
+
+
+def test_process_source_does_not_mark_processed_when_max_pages_safety_valve_hit(
+    session: Session, classifier: Classifier
+) -> None:
+    """Если весь `max_pages` исчерпан, а начало окна поиска так и не встретилось (везде
+    свежие даты) — источник не подтвердил покрытие окна и не должен отмечаться
+    обработанным, чтобы доверстывание подхватило остаток на следующем прогоне."""
+
+    def fetch_page(page: int = 1) -> list[Publication]:
+        return [
+            _pub(
+                "publication.pravo.gov.ru",
+                f"постановление №{page} ветеран боевых действий выплата принят",
+                f"http://publication.pravo.gov.ru/document/{page}",
+                published_at=NOW,
+            )
+        ]
+
+    spec = SourceSpec("publication.pravo.gov.ru", fetch_page, max_pages=3)
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 3  # публикации всё же обработаны
+    assert session.get(SourceState, "publication.pravo.gov.ru") is None  # но не отмечен обработанным
+
+
+def test_process_source_adaptive_period_passed_to_fetch_page(session: Session, classifier: Classifier) -> None:
+    """`resolve_period` вызывается один раз на весь прогон, и его результат передаётся в
+    `fetch_page` как kwarg `period` на каждой странице."""
+    calls: list[tuple[int, str]] = []
+
+    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
+        calls.append((page, period))
+        if page == 1:
+            return [
+                _pub(
+                    "publication.pravo.gov.ru",
+                    "постановление ветеран боевых действий выплата принят",
+                    "http://publication.pravo.gov.ru/document/1",
+                    published_at=NOW,
+                )
+            ]
+        return []
+
+    spec = SourceSpec(
+        "publication.pravo.gov.ru",
+        fetch_page,
+        resolve_period=lambda window_start, now: "weekly",
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert calls == [(1, "weekly"), (2, "weekly")]
+
+
+def test_process_source_falls_back_to_weekly_when_daily_page_one_empty(
+    session: Session, classifier: Classifier
+) -> None:
+    """docs/SPEC_pravo_gov_pagination_depth.md, п.3: `daily` пуст на первой странице —
+    источник пробует `weekly` вместо того, чтобы молча решить, что публикаций нет."""
+    calls: list[tuple[int, str]] = []
+
+    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
+        calls.append((page, period))
+        if period == "daily":
+            return []
+        if page == 1:
+            return [
+                _pub(
+                    "publication.pravo.gov.ru",
+                    "постановление ветеран боевых действий выплата принят",
+                    "http://publication.pravo.gov.ru/document/1",
+                    published_at=NOW,
+                )
+            ]
+        return []
+
+    spec = SourceSpec(
+        "publication.pravo.gov.ru",
+        fetch_page,
+        resolve_period=lambda window_start, now: "daily",
+        period_fallback={"daily": "weekly"},
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert calls == [(1, "daily"), (1, "weekly"), (2, "weekly")]
+    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно покрыто
+
+
+def test_process_source_still_empty_after_period_fallback_marks_processed(
+    session: Session, classifier: Classifier
+) -> None:
+    """Если и `daily`, и фолбэк `weekly` пусты на первой странице — публикаций
+    действительно нет в окне, источник отмечается обработанным как обычно."""
+
+    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
+        return []
+
+    spec = SourceSpec(
+        "publication.pravo.gov.ru",
+        fetch_page,
+        resolve_period=lambda window_start, now: "daily",
+        period_fallback={"daily": "weekly"},
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 0
+    assert session.get(SourceState, "publication.pravo.gov.ru") is not None
+
+
+def test_process_source_recomputes_max_pages_on_period_fallback(
+    session: Session, classifier: Classifier
+) -> None:
+    """docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: `max_pages` — теперь per-period
+    (`max_pages_by_period`). Фолбэк `daily` -> `weekly` должен переключить не только
+    `period`, но и допустимый потолок страниц — иначе маленький бюджет `daily`
+    (актуальный для узкого дневного окна) обрывает уже идущий `weekly`-обход, для
+    которого выделен больший бюджет, раньше настоящего конца листинга."""
+    calls: list[tuple[int, str]] = []
+
+    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
+        calls.append((page, period))
+        if period == "daily":
+            return []  # daily пуст -> фолбэк на weekly
+        if page <= 4:
+            return [
+                _pub(
+                    "publication.pravo.gov.ru",
+                    f"постановление №{page} ветеран боевых действий выплата принят",
+                    f"http://publication.pravo.gov.ru/document/{page}",
+                    published_at=NOW,
+                )
+            ]
+        return []
+
+    spec = SourceSpec(
+        "publication.pravo.gov.ru",
+        fetch_page,
+        max_pages_by_period={"daily": 2, "weekly": 10},
+        resolve_period=lambda window_start, now: "daily",
+        period_fallback={"daily": "weekly"},
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    # Если бы потолок не пересчитывался при фолбэке, обход остановился бы на странице 2
+    # (бюджет daily) вместо естественного конца листинга на странице 5 (weekly).
+    assert result.new_signals == 4
+    assert calls == [(1, "daily"), (1, "weekly"), (2, "weekly"), (3, "weekly"), (4, "weekly"), (5, "weekly")]
+    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно покрыто
+
+
+def test_process_source_window_tolerance_allows_slightly_stale_items(
+    session: Session, classifier: Classifier
+) -> None:
+    """docs/SPEC_pravo_gov_pagination_depth.md, п.1: допуск на неидеальную сортировку
+    листинга — публикация чуть старше окна (в пределах `window_tolerance`) всё ещё
+    обрабатывается, останов срабатывает только за пределами допуска."""
+    from parser.state import mark_source_processed
+
+    window_start = NOW - dt.timedelta(hours=24)
+    mark_source_processed(session, "publication.pravo.gov.ru", success_at=window_start)
+    session.commit()
+
+    within_tolerance = _pub(
+        "publication.pravo.gov.ru",
+        "постановление ветеран боевых действий выплата принят",
+        "http://publication.pravo.gov.ru/document/within",
+        published_at=window_start - dt.timedelta(hours=12),  # старше окна, но в допуске (1 день)
+    )
+    beyond_tolerance = _pub(
+        "publication.pravo.gov.ru",
+        "постановление ветеран боевых действий выплата принят",
+        "http://publication.pravo.gov.ru/document/beyond",
+        published_at=window_start - dt.timedelta(days=1, hours=1),  # уже за пределами допуска
+    )
+
+    spec = SourceSpec(
+        "publication.pravo.gov.ru",
+        lambda page=1: [within_tolerance, beyond_tolerance] if page == 1 else [],
+        window_tolerance=dt.timedelta(days=1),
+    )
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1  # within_tolerance обработан, beyond_tolerance — нет
