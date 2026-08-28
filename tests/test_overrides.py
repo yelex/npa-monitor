@@ -303,6 +303,47 @@ def test_apply_selection_flags_stale_when_kb_row_hash_changed_since_diff(
     assert result.stale is True  # kb_path row_hash="hash-v1" != signal.measure_row_hash="stale-hash"
 
 
+def test_apply_selection_sees_fresh_row_hash_after_export_kb_in_same_process(
+    session: Session, kb_path: str
+) -> None:
+    """SPEC_fix_review_75af72b.md, замечание №2: `export_kb` перезаписывает файл и
+    пересчитывает `row_hash`, но без явной инвалидации `db/measures.py::lru_cache`
+    `apply_selection` в том же процессе продолжил бы читать замороженный снапшот —
+    ложноотрицательный STALE."""
+    from scripts.export_kb import export_kb
+
+    signal1 = _make_signal_with_measure(session, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    sr1 = _make_signal_result(
+        session, signal=signal1, task_id="sig-1",
+        changes=[{"field": "measure_sum", "was": "195 000 ₽", "now": "200 000 ₽", "match": "exact"}],
+        selection={"0": {"action": "accept"}},
+    )
+    # Первый вызов прогревает `lru_cache` `db/measures.py::_load_raw_rows` снапшотом
+    # с исходным row_hash="hash-v1".
+    result1 = apply_selection(session, signal_result=sr1, changed_by=111, kb_path=kb_path)
+    session.commit()
+    assert result1.applied_fields == ["measure_sum"]
+
+    touched = export_kb(session, kb_path=kb_path)
+    assert touched == 1  # файл перезаписан, row_hash пересчитан и отличается от "hash-v1"
+
+    # Второй сигнал по той же мере, база хэша зафиксирована ДО экспорта — как в
+    # реальном сценарии "агент прислал новый дифф, пока запись уже сменилась".
+    signal2 = _make_signal_with_measure(session, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    sr2 = _make_signal_result(
+        session, signal=signal2, task_id="sig-2",
+        changes=[{
+            "field": "measure_name", "was": "Выплата при заключении контракта",
+            "now": "Новое имя", "match": "exact",
+        }],
+        selection={"0": {"action": "accept"}},
+    )
+    result2 = apply_selection(session, signal_result=sr2, changed_by=111, kb_path=kb_path)
+
+    assert result2.applied_fields == ["measure_name"]  # не конфликт: measure_name не трогали
+    assert result2.stale is True  # без invalidate_kb_cache() в export_kb здесь было бы False
+
+
 # --- overridden_measure_ids ------------------------------------------------------
 
 

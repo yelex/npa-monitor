@@ -14,10 +14,13 @@ STALE-детект (сравнение с `Signal.measure_row_hash`, зафик�
 отправки задачи агенту), а он самосогласован, пока хэш детерминирован и
 меняется при изменении содержимого записи.
 
-ВАЖНО: после экспорта требуется перезапуск бота — `db/measures.py::_load_records`/
-`_load_raw_rows` кэшируют снапшот по пути (`lru_cache`) и не увидят новый файл до
-рестарта. Это осознанное упрощение MVP (SPEC_result_edit.md, раздел «Решения по
-открытым вопросам» п.3), не автоматическая инвалидация кэша в проде.
+`export_kb` сбрасывает кэш сырых KB-строк (`db/measures.py::invalidate_kb_cache`,
+docs/SPEC_fix_review_75af72b.md) сразу после записи файла — `load_raw_record`/
+`kb_field_names` (write-back overlay, STALE-детект) видят новый снапшот без
+рестарта бота. Индекс поиска мер (`db/measures.py::_load_records`,
+`MeasureRecord`) отдельным `lru_cache` не затронут этим сбросом — новые
+названия/теги в поиске появятся только после рестарта; это осознанное
+упрощение MVP (SPEC_result_edit.md, раздел «Решения по открытым вопросам» п.3).
 
 Запуск вручную: `python -m scripts.export_kb` (тот же путь, что в `.env`
 `BENEFITS_KNOWLEDGE_BASE_PATH`, по умолчанию `data/benefits_knowledge_base.json`).
@@ -31,6 +34,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from db.measures import invalidate_kb_cache
 from db.models import MeasureOverride
 
 log = logging.getLogger("export_kb")
@@ -77,10 +81,12 @@ def export_kb(session: Session, *, kb_path: str | Path) -> int:
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
+    invalidate_kb_cache()
 
     log.warning(
-        "export_kb: %s перезаписан (%d записей затронуто overlay); требуется "
-        "перезапуск бота — db/measures.py кэширует снапшот по пути (MVP)",
+        "export_kb: %s перезаписан (%d записей затронуто overlay); кэш сырых "
+        "KB-строк сброшен (db/measures.py::invalidate_kb_cache), поисковый "
+        "индекс мер по-прежнему требует перезапуска бота (MVP)",
         path, touched,
     )
     return touched

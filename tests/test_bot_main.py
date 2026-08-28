@@ -1755,6 +1755,36 @@ async def test_on_override_apply_conflict_blocks_write_and_does_not_export(tmp_p
     assert json.loads(kb_path.read_text(encoding="utf-8"))[0]["measure_sum"] == "195 000 ₽"
 
 
+async def test_on_override_apply_conflict_message_escapes_html_in_values(tmp_path, monkeypatch) -> None:
+    """SPEC_fix_review_75af72b.md, замечание №1: значения из текста НПА в сообщении
+    о конфликте (`parse_mode=HTML`) должны быть экранированы — иначе `<`/`&` в
+    `actual_value` ломают `sendMessage` ("can't parse entities")."""
+    kb_path = tmp_path / "kb.json"
+    kb_row = {"measure_id": "00_svo_1", "measure_sum": "<b>&hacked</b>", "row_hash": "hash-v1"}
+    kb_path.write_text(json.dumps([kb_row], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("BENEFITS_KNOWLEDGE_BASE_PATH", str(kb_path))
+    bot_main.get_settings.cache_clear()
+
+    sig_id = _make_in_progress_signal()
+    _set_signal_measure(sig_id, measure_id="00_svo_1", measure_row_hash="hash-v1")
+    task_id = _make_signal_result_with_changes(
+        sig_id,
+        changes=[{"field": "measure_sum", "was": "СТАРОЕ ЗНАЧЕНИЕ", "now": "200 000 ₽", "match": "exact"}],
+        selection={"0": {"action": "accept"}},
+    )
+    cb = MagicMock()
+    cb.from_user.id = 111
+    cb.data = f"ovrap:{task_id}"
+    cb.message.answer = AsyncMock()
+    cb.answer = AsyncMock()
+
+    await bot_main.on_override_apply(cb)
+
+    text = cb.message.answer.await_args.args[0]
+    assert "<b>&hacked</b>" not in text
+    assert "&lt;b&gt;&amp;hacked&lt;/b&gt;" in text
+
+
 async def test_on_override_apply_nothing_selected_shows_alert() -> None:
     sig_id = _make_in_progress_signal()
     _set_signal_measure(sig_id, measure_id="00_svo_1", measure_row_hash="hash-v1")

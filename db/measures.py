@@ -164,6 +164,15 @@ def load_raw_record(measure_id: str, *, path: str | Path) -> dict | None:
     return None
 
 
+def invalidate_kb_cache() -> None:
+    """Сбрасывает `lru_cache` сырых KB-строк (`_load_raw_rows`, за ним —
+    `load_raw_record`/`kb_field_names`) — вызывать после перезаписи KB-файла на
+    диске (`scripts/export_kb.py::export_kb`), иначе `apply_selection` в том же
+    процессе продолжит читать замороженный снапшот и может дать ложноотрицательный
+    STALE (docs/SPEC_fix_review_75af72b.md, замечание №2)."""
+    _load_raw_rows.cache_clear()
+
+
 def _matches_category(record: MeasureRecord, category: SignalCategory) -> bool:
     datasets = _CATEGORY_SOURCE_DATASETS.get(category, frozenset())
     if record.source_dataset in datasets:

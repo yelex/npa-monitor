@@ -14,6 +14,7 @@ from db.measures import (
     _region_name,
     build_pool,
     cosine,
+    invalidate_kb_cache,
     kb_field_names,
     lemmatized_bow,
     load_raw_record,
@@ -220,6 +221,44 @@ def test_load_raw_record_returns_full_row_by_measure_id(kb_path) -> None:
 
 def test_load_raw_record_returns_none_for_unknown_measure_id(kb_path) -> None:
     assert load_raw_record("no-such-id", path=kb_path) is None
+
+
+# --- invalidate_kb_cache, docs/SPEC_fix_review_75af72b.md ------------------------
+
+
+def test_invalidate_kb_cache_clears_load_raw_record_cache(kb_path) -> None:
+    """Без явного сброса `load_raw_record` продолжил бы отдавать `lru_cache`-снимок
+    файла, каким он был до перезаписи (например `export_kb`) — ложноотрицательный
+    STALE (SPEC_fix_review_75af72b.md, замечание №2)."""
+    first = load_raw_record("00_svo_1", path=kb_path)
+    assert first["row_hash"] == "hash-svo-1"
+
+    rows = json.loads(Path(kb_path).read_text(encoding="utf-8"))
+    rows[0]["row_hash"] = "hash-svo-1-updated"
+    Path(kb_path).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+    stale = load_raw_record("00_svo_1", path=kb_path)
+    assert stale["row_hash"] == "hash-svo-1"  # всё ещё из кэша
+
+    invalidate_kb_cache()
+
+    fresh = load_raw_record("00_svo_1", path=kb_path)
+    assert fresh["row_hash"] == "hash-svo-1-updated"
+
+
+def test_invalidate_kb_cache_clears_kb_field_names_cache(kb_path) -> None:
+    before = kb_field_names(kb_path)
+    assert "new_field" not in before
+
+    rows = json.loads(Path(kb_path).read_text(encoding="utf-8"))
+    rows[0]["new_field"] = "x"
+    Path(kb_path).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+    assert "new_field" not in kb_field_names(kb_path)  # всё ещё из кэша
+
+    invalidate_kb_cache()
+
+    assert "new_field" in kb_field_names(kb_path)
 
 
 def test_all_kb_regions_have_regions_yaml_entry() -> None:

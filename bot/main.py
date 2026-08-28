@@ -39,7 +39,7 @@ from db.enums import (
     SignalStatus,
     SignalType,
 )
-from db.measures import MeasureRecord, build_pool, lemmatized_bow
+from db.measures import MeasureRecord, build_pool, invalidate_kb_cache, lemmatized_bow
 from db.measures import rank as rank_measures
 from db.models import Signal, SignalCategoryLink, StatusHistory
 from db.overrides import (
@@ -1611,7 +1611,9 @@ async def on_override_apply(cb: CallbackQuery) -> None:
         if result.conflicts:
             db.rollback()
             details = "; ".join(
-                f"«{c.field}»: ожидалось «{c.expected_was}», сейчас «{c.actual_value}»"
+                f"«{html.escape(str(c.field), quote=False)}»: ожидалось "
+                f"«{html.escape(str(c.expected_was), quote=False)}», сейчас "
+                f"«{html.escape(str(c.actual_value), quote=False)}»"
                 for c in result.conflicts
             )
             await cb.message.answer(  # type: ignore[union-attr]
@@ -1628,6 +1630,7 @@ async def on_override_apply(cb: CallbackQuery) -> None:
 
         db.commit()
         export_kb(db, kb_path=kb_path)
+        invalidate_kb_cache()  # не полагаться на инвалидацию внутри export_kb (SPEC_fix_review_75af72b)
 
     await cb.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
     await cb.message.answer(_format_apply_result(result))  # type: ignore[union-attr]
