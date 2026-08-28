@@ -17,6 +17,10 @@ _EXCLUDED_URL_PATTERNS = (
     # sfr.gov.ru/branches/<регион>/info/~<дата>/<id> — регионально растиражированные
     # справочные материалы, не публикации о событии (docs/SPEC_stale_publications_filter.md).
     re.compile(r"^https?://(?:www\.)?sfr\.gov\.ru/branches/[^/]+/info/"),
+    # vrf.tass.ru — агрегатор региональных СМИ (перепечатки «Популярные новости
+    # России», <регион>/<издание>-ru/<id>), не источник публикаций о событии —
+    # docs/SPEC_vrf_tass_aggregator_filter.md.
+    re.compile(r"^https?://(?:www\.)?vrf\.tass\.ru/"),
 )
 
 

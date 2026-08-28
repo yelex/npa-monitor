@@ -47,6 +47,15 @@ def test_is_excluded_path_matches_sfr_branches_info() -> None:
     assert is_excluded_path("https://www.sfr.gov.ru/branches/78/info/~2023/01/01/9") is True
 
 
+def test_is_excluded_path_matches_vrf_tass_aggregator() -> None:
+    """vrf.tass.ru — агрегатор региональных СМИ (перепечатки «Популярные новости
+    России», <регион>/<издание>-ru/<id>), docs/SPEC_vrf_tass_aggregator_filter.md."""
+    assert is_excluded_path("https://vrf.tass.ru/arxangelskaia-oblast/region29-ru/1372313") is True
+    assert is_excluded_path("https://vrf.tass.ru/ianao/sever-press-ru/13727476-pravitelstvo") is True
+    # собственные ленты ТАСС — не агрегатор, остаются в обработке
+    assert is_excluded_path("https://tass.ru/obschestvo/28050531") is False
+
+
 def test_is_excluded_path_does_not_match_regular_news() -> None:
     assert is_excluded_path("https://sfr.gov.ru/press_center/news/~2026/08/19/284025") is False
     assert is_excluded_path("https://kremlin.ru/acts/news/80518") is False
