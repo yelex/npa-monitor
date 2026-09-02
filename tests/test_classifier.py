@@ -234,3 +234,73 @@ def test_explain_format_is_readable() -> None:
     assert "инвалид" in text
     assert "пособие" in text
     assert "РЕЛЕВАНТНО" in text
+
+
+# --- Stage B: гибридный fallback-классификатор ЖС (docs/SPEC_hybrid_classifier.md) ---
+
+# Заголовок в духе кейса 412-П Камчатки — см. docstring
+# tests/test_hybrid_classifier.py::KAMCHATKA_STYLE_TITLE (тот же фикстурный текст, тут
+# не импортируется напрямую, чтобы тест классификатора не зависел от деталей модуля
+# Stage B, только от его публичного контракта через Classifier.explain).
+_KAMCHATKA_STYLE_TITLE = (
+    "Постановление Правительства Камчатского края № 412-П о дополнительных выплатах "
+    "отдельным категориям граждан, принимающим участие в специальной военной операции"
+)
+
+
+def test_hybrid_stage_b_classifies_svo_when_stage_a_finds_nothing() -> None:
+    # Stage A по отдельности эту фразу не находит — ни одно ЖС-ключевое слово
+    # life_situations.yaml::svo не стоит вплотную рядом с "специальной военной
+    # операции" (см. parser/ru_stem.py — смежность слов обязательна).
+    pub = _publication("publication.pravo.gov.ru/document/4100202608240009", _KAMCHATKA_STYLE_TITLE)
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.category_matches == {}  # Stage A действительно пуст
+    assert trace.hybrid is not None
+    assert trace.hybrid.accepted is True
+    assert trace.result.categories == (SignalCategory.SVO,)
+    assert trace.result.is_relevant is True
+    assert "гибрид" in trace.format()
+
+
+def test_hybrid_stage_b_rejects_unrelated_topic() -> None:
+    # AGENTS.md раздел 16 п.15 — реальный ложноположительный класс (рыболовство/
+    # "пятилетка Китая" из RSS rg.ru), контрольная выборка 3 спеки.
+    pub = _publication("rg.ru", "Постановление о пятилетнем плане развития рыболовства Китая")
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.result.categories == ()
+    assert trace.result.is_relevant is False
+    assert trace.hybrid is not None
+    assert trace.hybrid.accepted is False
+
+
+def test_hybrid_stage_b_priority_capped_at_medium() -> None:
+    # План, раздел 2, п.6: без капа "постановление" (маркер документа) + "новых"
+    # (слово приоритета) + известный регион (rf) дали бы HIGH — Stage B-путь капается
+    # на MEDIUM независимо от этого, см. tests/test_classifier.py::
+    # test_high_priority_document_marker_priority_word_and_known_region для сравнения
+    # с эквивалентным Stage A-путём, где кап не действует.
+    pub = _publication(
+        "publication.pravo.gov.ru/document/4100202608240009",
+        "Постановление Правительства Камчатского края № 412-П о новых дополнительных "
+        "выплатах отдельным категориям граждан, принимающим участие в специальной "
+        "военной операции",
+    )
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.result.categories == (SignalCategory.SVO,)
+    assert trace.result.priority == Priority.MEDIUM
+
+
+def test_hybrid_stage_b_skipped_when_embedder_unavailable(monkeypatch) -> None:
+    # Fallback (спека, п.8): эмбеддер недоступен -> Stage B пропускается целиком,
+    # поведение = сегодняшнее (Stage A-only), без исключений.
+    monkeypatch.setattr("parser.classifier.classify_hybrid", lambda text: None)
+    pub = _publication("publication.pravo.gov.ru/document/4100202608240009", _KAMCHATKA_STYLE_TITLE)
+
+    trace = CLASSIFIER.explain(pub)
+
+    assert trace.hybrid is None
+    assert trace.result.categories == ()
+    assert trace.result.is_relevant is False

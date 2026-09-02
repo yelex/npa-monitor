@@ -46,6 +46,7 @@ from db.catalog import (
 )
 from db.enums import REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory
 from parser.filters import domain_of
+from parser.hybrid_classifier import HybridDecision, classify_hybrid
 from parser.models import Publication
 from parser.ru_stem import contains_keyword, find_matches
 
@@ -81,6 +82,10 @@ class ClassificationTrace:
     priority_word_matches: tuple[str, ...]
     event_type_matches: dict[EventType, tuple[str, ...]]  # только типы с совпадением
     result: ClassificationResult
+    # Stage B (docs/SPEC_hybrid_classifier.md) — заполнен, только если Stage A не нашёл
+    # ЖС, но текст похож на меру/НПА (см. Classifier.explain). `None`, если Stage B не
+    # запускался (Stage A уже нашёл категорию) либо недоступен (эмбеддер не загрузился).
+    hybrid: HybridDecision | None = None
 
     def format(self) -> str:
         lines = []
@@ -89,6 +94,18 @@ class ClassificationTrace:
                 f"{cat.value} (по {', '.join(kws)!r})" for cat, kws in self.category_matches.items()
             )
             lines.append(f"ЖС: {cats}")
+        elif self.hybrid is not None:
+            h = self.hybrid
+            if h.accepted:
+                lines.append(
+                    f"ЖС: {h.category.value} (гибрид, якорь {h.anchor!r}, "
+                    f"cos={h.cos_score:.2f}, bm25={h.bm25_score:.2f})"
+                )
+            else:
+                lines.append(
+                    f"ЖС: нет совпадений (гибрид near-miss: топ {h.category.value}, "
+                    f"cos={h.cos_score:.2f}, bm25={h.bm25_score:.2f}, зазор={h.rrf_gap:.5f})"
+                )
         else:
             lines.append("ЖС: нет совпадений")
 
@@ -219,13 +236,31 @@ class Classifier:
         }
         categories = tuple(category_matches)
         topic_block_matches = find_matches(text_lower, self.keywords.topic_block)
+        document_marker_matches = find_matches(text_lower, self.keywords.document_markers)
+
+        # Stage B (docs/SPEC_hybrid_classifier.md) — Stage A выше без изменений. Запуск
+        # только если Stage A не нашёл ни одной ЖС, а текст похож на меру/НПА (профиль
+        # кейса Камчатки 412-П, AGENTS.md раздел 16 п.13/14: канцелярский оборот без
+        # опорного слова). Итоговая релевантность (ниже) всё равно требует topic_block —
+        # формула раздела 4.4 AGENTS.md не расширяется, Stage B только пополняет
+        # `categories`, когда Stage A их не нашёл.
+        hybrid_decision: HybridDecision | None = None
+        if not categories and (topic_block_matches or document_marker_matches):
+            hybrid_decision = classify_hybrid(text)
+            if hybrid_decision is not None and hybrid_decision.accepted:
+                categories = (hybrid_decision.category,)
+
         is_relevant = bool(categories) and bool(topic_block_matches)
 
         region = detect_region(publication, self.regions, self.federal_domains)
         event_type = detect_event_type(text, self.keywords)
         priority = detect_priority(text, self.keywords, region)
+        if hybrid_decision is not None and hybrid_decision.accepted and priority == Priority.HIGH:
+            # План, раздел 2, п.6 / спека: путь Stage B менее надёжен, чем точное
+            # совпадение Stage A — приоритет кап на MEDIUM независимо от
+            # document_markers/priority_high_words.
+            priority = Priority.MEDIUM
 
-        document_marker_matches = find_matches(text_lower, self.keywords.document_markers)
         priority_word_matches = find_matches(text_lower, self.keywords.priority_high_words)
         event_type_matches = {
             et: matches
@@ -247,4 +282,5 @@ class Classifier:
             priority_word_matches=priority_word_matches,
             event_type_matches=event_type_matches,
             result=result,
+            hybrid=hybrid_decision,
         )

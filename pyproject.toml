@@ -17,6 +17,10 @@ dependencies = [
     "aiogram>=3.4,<4.0",
     "pydantic-settings>=2.0",
     "pymorphy3>=2.0",
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+    "rank-bm25>=0.2",
+    "tokenizers>=0.19",
 ]
 
 [project.optional-dependencies]

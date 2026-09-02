@@ -146,3 +146,13 @@ def find_matches(text_lower: str, keywords: tuple[str, ...]) -> tuple[str, ...]:
     """Как `contains_keyword`, но возвращает сами совпавшие ключевые слова — для
     трейса классификации (PLAN.md Фаза 6+, «видеть, как парсер принимает решение»)."""
     return tuple(kw for kw in keywords if keyword_pattern(kw).search(text_lower))
+
+
+_WORD_RE = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
+
+
+def stem_tokens(text: str) -> list[str]:
+    """Токенизация + та же обрезка окончаний, что `keyword_pattern` (см. `_word_stem`) —
+    для BM25 (`parser/hybrid_classifier.py`, Stage B, docs/SPEC_hybrid_classifier.md):
+    словоформы не должны портить IDF так же, как не должны портить поиск по Stage A."""
+    return [_word_stem(w) for w in _WORD_RE.findall(text.lower())]

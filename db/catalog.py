@@ -43,6 +43,15 @@ class LifeSituation:
 
 
 @dataclasses.dataclass(frozen=True)
+class HybridAnchorSet:
+    """Якорные фразы Stage B на одну ЖС, `data/hybrid_anchors.yaml` —
+    `parser/hybrid_classifier.py`, docs/SPEC_hybrid_classifier.md."""
+
+    category: SignalCategory
+    anchors: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class RegionEntry:
     code: str
     name: str
@@ -83,6 +92,23 @@ def load_life_situations(path: Path | None = None) -> tuple[LifeSituation, ...]:
                 category=category,
             )
         )
+    return tuple(result)
+
+
+def load_hybrid_anchors(path: Path | None = None) -> tuple[HybridAnchorSet, ...]:
+    """Якоря Stage B (`parser/hybrid_classifier.py`) — та же валидация id против
+    `db.enums.SignalCategory`, что и `load_life_situations`, по тем же причинам."""
+    raw = _load_yaml(path or DATA_DIR / "hybrid_anchors.yaml") or []
+    result: list[HybridAnchorSet] = []
+    for item in raw:
+        try:
+            category = SignalCategory(item["id"])
+        except ValueError as exc:
+            raise CatalogError(
+                f"hybrid_anchors.yaml: id={item['id']!r} не соответствует "
+                f"db.enums.SignalCategory — добавь значение в enum или исправь id"
+            ) from exc
+        result.append(HybridAnchorSet(category=category, anchors=tuple(item["anchors"])))
     return tuple(result)
 
 
