@@ -1,7 +1,12 @@
 """Тесты parser/filters.py, PLAN.md Фаза 3."""
 from __future__ import annotations
 
-from parser.filters import is_domain_whitelisted, is_excluded_path, is_text_content
+from parser.filters import (
+    is_domain_whitelisted,
+    is_excluded_path,
+    is_news_activity_noise,
+    is_text_content,
+)
 
 WHITELIST = {"kremlin.ru", "sfr.gov.ru", "mos.ru"}
 
@@ -59,3 +64,95 @@ def test_is_excluded_path_matches_vrf_tass_aggregator() -> None:
 def test_is_excluded_path_does_not_match_regular_news() -> None:
     assert is_excluded_path("https://sfr.gov.ru/press_center/news/~2026/08/19/284025") is False
     assert is_excluded_path("https://kremlin.ru/acts/news/80518") is False
+
+
+# docs/SPEC_news_activity_filter.md: сигналы 170/171/175 из живого прогона, отклонённые
+# экспертом вручную (rejection_reason=not_npa) — должны отсекаться pre-filter'ом.
+def test_is_news_activity_noise_speech_verb_with_name_sig170() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://ria.ru/20260828/golikova-1.html",
+            "Голикова рассказала об обработке обращений от участников СВО",
+        )
+        is True
+    )
+
+
+def test_is_news_activity_noise_name_colon_with_statistic_sig171() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://tass.ru/obschestvo/28050531",
+            "Голикова: правительство решило 96% обращений участников СВО",
+        )
+        is True
+    )
+
+
+def test_is_news_activity_noise_crime_sig175() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://rg.ru/2026/08/28/reg-cfo/bryanchanka.html",
+            "Брянчанка оформила фиктивный брак с инвалидом и незаконно получила 1,4 млн",
+        )
+        is True
+    )
+
+
+def test_is_news_activity_noise_lets_real_amendment_through() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://tass.ru/obschestvo/99999999",
+            "Внесены изменения в постановление о выплатах участникам СВО № 1234",
+        )
+        is False
+    )
+
+
+def test_is_news_activity_noise_only_applies_to_news_sources() -> None:
+    # тот же заголовок, что sig 170 — на первоисточнике (не tass/ria/rg) не фильтруется
+    assert (
+        is_news_activity_noise(
+            "https://mos.ru/authority/documents/doc/1/",
+            "Голикова рассказала об обработке обращений от участников СВО",
+        )
+        is False
+    )
+
+
+def test_is_news_activity_noise_ignores_statistic_with_npa_requisites() -> None:
+    # цифра есть, но реквизиты НПА в описании — не считается "голой статистикой"
+    assert (
+        is_news_activity_noise(
+            "https://tass.ru/obschestvo/1",
+            "Выплаты повышены на 5%",
+            "Постановление Правительства № 456 от 01.02.2026",
+        )
+        is False
+    )
+
+
+def test_is_news_activity_noise_empty_title_is_false() -> None:
+    assert is_news_activity_noise("https://tass.ru/x", "") is False
+
+
+# Ревью docs/SPEC_news_activity_filter.md: "следствие"/"прокуратур" бились подстрокой —
+# "вследствие" содержит "следствие", а голое упоминание прокуратуры не значит криминал.
+def test_is_news_activity_noise_vsledstvie_with_npa_requisites_passes() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://tass.ru/obschestvo/2",
+            "Выплаты инвалидам вследствие военной травмы увеличены — "
+            "постановление № 10 от 01.01.2026",
+        )
+        is False
+    )
+
+
+def test_is_news_activity_noise_prosecutor_explains_law_passes() -> None:
+    assert (
+        is_news_activity_noise(
+            "https://ria.ru/20260901/prokuratura-1.html",
+            "Прокуратура разъяснила о выплатах инвалидам",
+        )
+        is False
+    )

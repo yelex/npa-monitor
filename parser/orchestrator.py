@@ -36,7 +36,7 @@ from db.service import link_document_to_signal, recent_documents_with_titles, re
 from parser.classifier import Classifier
 from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_title
 from parser.fetcher import SourceUnavailable
-from parser.filters import is_domain_whitelisted, is_excluded_path
+from parser.filters import NOT_NPA_ACTIVITY_REASON, is_domain_whitelisted, is_excluded_path, is_news_activity_noise
 from parser.llm import ClassifierLLMClient, get_default_client
 from parser.llm_priority import apply_refinements, chunk_signal_ids, log_refinement, refine_priorities_batch
 from parser.models import Publication
@@ -104,6 +104,7 @@ class SourceRunResult:
     irrelevant: int = 0
     excluded: int = 0
     reviews: int = 0
+    news_activity: int = 0
     error: str | None = None
     # PLAN.md Фаза 11 / docs/SPEC_llm_priority.md: id сигналов этого источника с
     # regex-приоритетом MEDIUM/LOW, созданных за этот прогон — материал для
@@ -298,6 +299,16 @@ def _process_publication(
         log.debug("  URL — известная статичная/справочная страница, не событие — пропуск")
         return
 
+    # docs/SPEC_news_activity_filter.md: новости о деятельности чиновников/криминал из
+    # СМИ (tass/ria/rg), похожие на релевантные по ЖС-словам в заголовке, но без
+    # отношения к конкретному НПА — pre-filter по заголовку/описанию, до дедупа и
+    # классификации (по образцу is_excluded_path выше). Помечается фиксированным тегом
+    # NOT_NPA_ACTIVITY_REASON — отличать от ручной чистки эксперта в логах/статистике.
+    if is_news_activity_noise(pub.url, pub.title, pub.summary):
+        result.news_activity += 1
+        log.debug("  новость о деятельности, не НПА (%s) — пропуск", NOT_NPA_ACTIVITY_REASON)
+        return
+
     # PLAN.md Фаза 9 п.2 / docs/SPEC_url_canonicalization.md: дедуп по канонизированному
     # URL (без www./схемы/шумовых query-параметров), не по сырому pub.url — иначе
     # `?index=N`-варианты того же документа проходят как разные публикации. Сигналу
@@ -425,7 +436,8 @@ def run_all(
         session.commit()
         results.append(result)
         log.info(
-            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d обзоров=%d",
+            "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d обзоров=%d "
+            "новостного_шума=%d",
             result.source_key,
             result.ok,
             result.new_signals,
@@ -433,6 +445,7 @@ def run_all(
             result.irrelevant,
             result.excluded,
             result.reviews,
+            result.news_activity,
         )
 
     medium_low_ids = [sid for result in results for sid in result.medium_low_signal_ids]
