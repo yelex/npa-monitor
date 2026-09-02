@@ -629,19 +629,27 @@ def test_process_source_does_not_mark_processed_when_max_pages_safety_valve_hit(
     assert session.get(SourceState, "publication.pravo.gov.ru") is None  # но не отмечен обработанным
 
 
-def test_process_source_adaptive_period_passed_to_fetch_page(session: Session, classifier: Classifier) -> None:
-    """`resolve_period` вызывается один раз на весь прогон, и его результат передаётся в
-    `fetch_page` как kwarg `period` на каждой странице."""
-    calls: list[tuple[int, str]] = []
+# docs/SPEC_pravo_gov_day_by_day.md: обход по календарным дням МСК (`SourceSpec.day_plan`)
+# вместо эскалации periodType daily->weekly->monthly (docs/SPEC_pravo_gov_pagination_depth.md,
+# упразднена — диагностика 02.09 показала weekly/monthly фиксированным текущим периодом,
+# не окном "последние N дней", недостижимым для catch-up старше недели/месяца).
 
-    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
-        calls.append((page, period))
+
+def test_process_source_day_plan_paginates_each_day_with_date_kwarg(
+    session: Session, classifier: Classifier
+) -> None:
+    """`day_plan` вызывается один раз, каждый день из плана пагинируется отдельно —
+    `fetch_page` получает kwargs `period="day"` и `date=DD.MM.YYYY` этого дня."""
+    calls: list[tuple[int, str, str]] = []
+
+    def fetch_page(page: int = 1, period: str = "day", date: str | None = None) -> list[Publication]:
+        calls.append((page, period, date))
         if page == 1:
             return [
                 _pub(
                     "publication.pravo.gov.ru",
-                    "постановление ветеран боевых действий выплата принят",
-                    "http://publication.pravo.gov.ru/document/1",
+                    f"постановление ветеран боевых действий выплата принят {date}",
+                    f"http://publication.pravo.gov.ru/document/{date}",
                     published_at=NOW,
                 )
             ]
@@ -650,117 +658,54 @@ def test_process_source_adaptive_period_passed_to_fetch_page(session: Session, c
     spec = SourceSpec(
         "publication.pravo.gov.ru",
         fetch_page,
-        resolve_period=lambda window_start, now: "weekly",
+        day_plan=lambda window_start, now: [dt.date(2026, 8, 19), dt.date(2026, 8, 20)],
     )
 
     result = process_source(session, classifier, spec, now=NOW)
     session.commit()
 
-    assert result.new_signals == 1
-    assert calls == [(1, "weekly"), (2, "weekly")]
+    assert result.new_signals == 2
+    assert calls == [
+        (1, "day", "19.08.2026"),
+        (2, "day", "19.08.2026"),
+        (1, "day", "20.08.2026"),
+        (2, "day", "20.08.2026"),
+    ]
+    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно полностью покрыто
 
 
-def test_process_source_falls_back_to_weekly_when_daily_page_one_empty(
+def test_process_source_day_plan_not_marked_processed_when_one_day_hits_safety_valve(
     session: Session, classifier: Classifier
 ) -> None:
-    """docs/SPEC_pravo_gov_pagination_depth.md, п.3: `daily` пуст на первой странице —
-    источник пробует `weekly` вместо того, чтобы молча решить, что публикаций нет."""
-    calls: list[tuple[int, str]] = []
+    """docs/SPEC_pravo_gov_day_by_day.md, п.4: если хотя бы один день из плана исчерпал
+    `day_max_pages`, не дойдя до естественного конца листинга (пустой страницы), источник
+    в целом не отмечается обработанным — доверстывание повторит весь диапазон дней."""
 
-    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
-        calls.append((page, period))
-        if period == "daily":
-            return []
-        if page == 1:
-            return [
-                _pub(
-                    "publication.pravo.gov.ru",
-                    "постановление ветеран боевых действий выплата принят",
-                    "http://publication.pravo.gov.ru/document/1",
-                    published_at=NOW,
-                )
-            ]
-        return []
-
-    spec = SourceSpec(
-        "publication.pravo.gov.ru",
-        fetch_page,
-        resolve_period=lambda window_start, now: "daily",
-        period_fallback={"daily": "weekly"},
-    )
-
-    result = process_source(session, classifier, spec, now=NOW)
-    session.commit()
-
-    assert result.new_signals == 1
-    assert calls == [(1, "daily"), (1, "weekly"), (2, "weekly")]
-    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно покрыто
-
-
-def test_process_source_still_empty_after_period_fallback_marks_processed(
-    session: Session, classifier: Classifier
-) -> None:
-    """Если и `daily`, и фолбэк `weekly` пусты на первой странице — публикаций
-    действительно нет в окне, источник отмечается обработанным как обычно."""
-
-    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
-        return []
-
-    spec = SourceSpec(
-        "publication.pravo.gov.ru",
-        fetch_page,
-        resolve_period=lambda window_start, now: "daily",
-        period_fallback={"daily": "weekly"},
-    )
-
-    result = process_source(session, classifier, spec, now=NOW)
-    session.commit()
-
-    assert result.new_signals == 0
-    assert session.get(SourceState, "publication.pravo.gov.ru") is not None
-
-
-def test_process_source_recomputes_max_pages_on_period_fallback(
-    session: Session, classifier: Classifier
-) -> None:
-    """docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: `max_pages` — теперь per-period
-    (`max_pages_by_period`). Фолбэк `daily` -> `weekly` должен переключить не только
-    `period`, но и допустимый потолок страниц — иначе маленький бюджет `daily`
-    (актуальный для узкого дневного окна) обрывает уже идущий `weekly`-обход, для
-    которого выделен больший бюджет, раньше настоящего конца листинга."""
-    calls: list[tuple[int, str]] = []
-
-    def fetch_page(page: int = 1, period: str = "daily") -> list[Publication]:
-        calls.append((page, period))
-        if period == "daily":
-            return []  # daily пуст -> фолбэк на weekly
-        if page <= 4:
+    def fetch_page(page: int = 1, period: str = "day", date: str | None = None) -> list[Publication]:
+        if date == "19.08.2026":
+            # никогда не пустая страница — день не может дойти до естественного конца
             return [
                 _pub(
                     "publication.pravo.gov.ru",
                     f"постановление №{page} ветеран боевых действий выплата принят",
-                    f"http://publication.pravo.gov.ru/document/{page}",
+                    f"http://publication.pravo.gov.ru/document/19-{page}",
                     published_at=NOW,
                 )
             ]
-        return []
+        return []  # 20.08 — сразу пусто, день покрыт полностью
 
     spec = SourceSpec(
         "publication.pravo.gov.ru",
         fetch_page,
-        max_pages_by_period={"daily": 2, "weekly": 10},
-        resolve_period=lambda window_start, now: "daily",
-        period_fallback={"daily": "weekly"},
+        day_plan=lambda window_start, now: [dt.date(2026, 8, 19), dt.date(2026, 8, 20)],
+        day_max_pages=3,
     )
 
     result = process_source(session, classifier, spec, now=NOW)
     session.commit()
 
-    # Если бы потолок не пересчитывался при фолбэке, обход остановился бы на странице 2
-    # (бюджет daily) вместо естественного конца листинга на странице 5 (weekly).
-    assert result.new_signals == 4
-    assert calls == [(1, "daily"), (1, "weekly"), (2, "weekly"), (3, "weekly"), (4, "weekly"), (5, "weekly")]
-    assert session.get(SourceState, "publication.pravo.gov.ru") is not None  # окно покрыто
+    assert result.new_signals == 3  # публикации дня 19.08 (страницы 1-3) всё же обработаны
+    assert session.get(SourceState, "publication.pravo.gov.ru") is None  # но источник не отмечен обработанным
 
 
 def test_process_source_window_tolerance_allows_slightly_stale_items(

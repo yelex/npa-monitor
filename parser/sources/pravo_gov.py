@@ -2,9 +2,17 @@
 
 Листинг не в статичном HTML `/documents/daily` — список подгружается AJAX-эндпоинтом
 `/Documents/search` (найден в `/js/documents.js`), отдающим HTML-фрагмент по `periodType`
-(`daily`/`weekly`/`monthly`) и `index` (номер страницы). Проверено вживую 2026-08-19:
-`periodType=daily` в момент проверки не дал результатов (пусто на эту дату/час),
-`periodType=weekly` — 1463 документа, структура листинга подтверждена реальной вёрсткой.
+и `index` (номер страницы).
+
+docs/SPEC_pravo_gov_day_by_day.md (диагностика 02.09, /tmp/claude_pravo_diag.md):
+`periodType=daily/weekly/monthly` — НЕ окно "последние N дней от now", а фиксированный
+ТЕКУЩИЙ календарный период (сегодня / неделя Пн-Вс / текущий месяц), не сдвигается назад
+ни при какой пагинации `index`; при простое дольше текущей недели/месяца документы
+пропущенного периода физически отсутствуют в выдаче на любой странице. Единственный
+подтверждённый вживую способ достать произвольный день прошлого — `periodType=day&
+date=DD.MM.YYYY` (параметр `date` игнорируется для `weekly`/`monthly`, работает только с
+`day`). Поэтому обход ведётся по календарным дням МСК (`build_day_plan`), не эскалацией
+period — см. `parser.orchestrator._process_source_by_day`.
 
 RSNET: 443 фильтруется для не-РФ IP, доступ по HTTP через `RU_PROXY_URL`
 (docs/STAGE0.md, раздел 2.1). Единственный источник официального опубликования
@@ -65,37 +73,36 @@ def _parse_search_page(html: str) -> list[Publication]:
 
 
 def fetch_documents(
-    *, period: str = "daily", page: int = 1, ru_proxy_url: str | None = None
+    *,
+    period: str = "day",
+    date: str | None = None,
+    page: int = 1,
+    ru_proxy_url: str | None = None,
 ) -> list[Publication]:
-    """`period` — "daily"/"weekly"/"monthly", соответствует фильтру периода на сайте."""
+    """`period` — фильтр периода на сайте ("day" — обход по календарным дням,
+    docs/SPEC_pravo_gov_day_by_day.md; "weekly"/"monthly" оставлены как параметр URL для
+    обратной совместимости, но оркестратором больше не используются — см. модульный
+    докстринг). `date` — `DD.MM.YYYY`, обязателен для `period="day"`, определяет
+    конкретный календарный день (МСК); без него сайт отдаёт текущий период."""
     url = f"{SEARCH_URL}?block=&periodType={period}&category=&index={page}"
+    if date is not None:
+        url += f"&date={date}"
     result = fetch(url, access="ru_proxy", ru_proxy_url=ru_proxy_url)
     return _parse_search_page(result.text)
 
 
-def select_period(window_start: dt.datetime, now: dt.datetime) -> str:
-    """Адаптивный `periodType` по размеру окна пропуска (docs/SPEC_pravo_gov_pagination_depth.md,
-    п.2): при обычном ежедневном прогоне (окно <=1 дня) листинг ленты небольшой и `daily`
-    его покрывает; после сбоя/простоя (окно 1-7 дней) объём вырастает на порядок
-    (~2500 документов/неделя) — нужен `weekly`; при более длинном пропуске (>7 дней) —
-    `monthly`, чтобы не упереться в предохранитель страниц раньше, чем в начало окна.
-    Чистая функция даты, без сетевого вызова — фолбэк на пустой `daily`-ответ отдельно,
-    см. `parser.orchestrator.SourceSpec.period_fallback`.
-
-    docs/SPEC_pravo_gov_pagination_depth.md, ревью п.1: `periodType=daily` фильтрует по
-    «Дата опубликования» строго в рамках текущего календарного дня источника (МСК), не
-    «последние 24 часа от now». Если окно `[window_start, now)` пересекает полночь МСК
-    (`window_start` и `now` — разные календарные даты), часть окна лежит на вчерашнем
-    дне, которого в `daily`-листинге просто нет ни на какой странице — это не глубже по
-    сортировке, а физическое отсутствие данных, фолбэк по пустой первой странице (п.3)
-    его не поймает, если сегодня уже есть свои публикации (страница непустая). Поэтому
-    `daily` выбирается только когда окно целиком внутри одного календарного дня МСК —
-    иначе сразу `weekly` (гарантированно покрывает и вчера, и сегодня)."""
-    span = now - window_start
-    if span > dt.timedelta(days=7):
-        return "monthly"
-    if span > dt.timedelta(days=1):
-        return "weekly"
-    if window_start.astimezone(MOSCOW_TZ).date() != now.astimezone(MOSCOW_TZ).date():
-        return "weekly"
-    return "daily"
+def build_day_plan(window_start: dt.datetime, now: dt.datetime) -> list[dt.date]:
+    """docs/SPEC_pravo_gov_day_by_day.md: план обхода — список календарных дней МСК от
+    `window_start` до `now` включительно, по возрастанию. Заменяет эскалацию
+    `periodType daily->weekly->monthly` (docs/SPEC_pravo_gov_pagination_depth.md) —
+    диагностика 02.09 показала, что `weekly`/`monthly` не окно "последние N дней", а
+    фиксированный текущий период, не достижимый для catch-up старше текущей недели/
+    месяца. Обычный ежедневный прогон — план из 1-2 дней; простой в месяц — ~30-31 дня."""
+    start_date = window_start.astimezone(MOSCOW_TZ).date()
+    end_date = now.astimezone(MOSCOW_TZ).date()
+    days = []
+    current = start_date
+    while current <= end_date:
+        days.append(current)
+        current += dt.timedelta(days=1)
+    return days

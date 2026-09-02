@@ -7,7 +7,7 @@ import datetime as dt
 import httpx
 import pytest
 
-from parser.sources.pravo_gov import MOSCOW_TZ, SEARCH_URL, SOURCE_KEY, fetch_documents, select_period
+from parser.sources.pravo_gov import MOSCOW_TZ, SEARCH_URL, SOURCE_KEY, build_day_plan, fetch_documents
 
 REAL_SEARCH_FRAGMENT = """
 <div class="documents-container"><div class="documents-table">
@@ -50,9 +50,12 @@ def test_fetch_documents_parses_real_markup_fragment(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client_cls(transport=httpx.MockTransport(handler)))
 
-    publications = fetch_documents(period="weekly", ru_proxy_url="http://proxy.local:8888")
+    # docs/SPEC_pravo_gov_day_by_day.md: обход теперь по календарным дням, не periodType
+    # weekly/monthly (подтверждено диагностикой 02.09 нерабочим для catch-up) — та же
+    # живая вёрстка, но через periodType=day&date=.
+    publications = fetch_documents(period="day", date="19.08.2026", ru_proxy_url="http://proxy.local:8888")
 
-    assert seen_urls == [f"{SEARCH_URL}?block=&periodType=weekly&category=&index=1"]
+    assert seen_urls == [f"{SEARCH_URL}?block=&periodType=day&category=&index=1&date=19.08.2026"]
     assert len(publications) == 1
     pub = publications[0]
     assert pub.source_key == SOURCE_KEY
@@ -67,38 +70,59 @@ def test_fetch_documents_uses_ru_proxy_access() -> None:
         fetch_documents(ru_proxy_url=None)
 
 
-# docs/SPEC_pravo_gov_pagination_depth.md, п.2 + ревью п.1: адаптивный period по размеру
-# окна пропуска, а для окон <=1 дня — ещё и по тому, пересекает ли окно полночь МСК
-# (`periodType=daily` источника фильтрует строго по календарному дню, не "24 часа
-# от now"). NOW выбран не на полуночи, чтобы "окно внутри суток" и "окно короче суток,
-# но с другой календарной датой" были различимыми сценариями.
+# docs/SPEC_pravo_gov_day_by_day.md: обход по календарным дням МСК вместо эскалации
+# periodType daily->weekly->monthly (docs/SPEC_pravo_gov_pagination_depth.md) —
+# диагностика 02.09 (/tmp/claude_pravo_diag.md) показала, что weekly/monthly на
+# pravo.gov.ru — фиксированный текущий период, не окно "последние N дней от now", и не
+# достаёт документы старше текущей недели/месяца ни на какой странице пагинации.
 NOW = dt.datetime(2026, 8, 28, 20, 0, tzinfo=MOSCOW_TZ)  # 28.08, 20:00 МСК
 
 
 @pytest.mark.parametrize(
-    ("window_start", "now", "expected_period"),
+    ("window_start", "now", "expected_days"),
     [
-        (NOW, NOW, "daily"),  # обычный ежедневный прогон, окно = 0
-        # окно 18 часов, но целиком внутри сегодняшнего календарного дня МСК — ещё daily
-        (NOW - dt.timedelta(hours=18), NOW, "daily"),
-        # ревью п.1: окно короче суток (2 часа), но пересекает полночь МСК — вчерашние
-        # публикации физически отсутствуют в daily-листинге, нужен weekly, а не daily
+        # обычный ежедневный прогон, окно = 0 — план из одного дня
+        (NOW, NOW, [dt.date(2026, 8, 28)]),
+        # окно 18 часов, целиком внутри сегодняшнего календарного дня МСК — тоже один день
+        (NOW - dt.timedelta(hours=18), NOW, [dt.date(2026, 8, 28)]),
+        # окно короче суток (2 часа), но пересекает полночь МСК — план должен включать
+        # оба календарных дня, иначе вчерашние публикации не будут запрошены вовсе
         (
             dt.datetime(2026, 8, 27, 23, 0, tzinfo=MOSCOW_TZ),
             dt.datetime(2026, 8, 28, 1, 0, tzinfo=MOSCOW_TZ),
-            "weekly",
+            [dt.date(2026, 8, 27), dt.date(2026, 8, 28)],
         ),
-        # ровно сутки назад — при любом времени суток это уже другая календарная дата
-        # МСК (пересекает полночь), поэтому weekly, а не daily, как было бы по одному
-        # только порогу span<=1 день
-        (NOW - dt.timedelta(days=1), NOW, "weekly"),
-        (NOW - dt.timedelta(days=1, hours=1), NOW, "weekly"),  # чуть больше суток — weekly
-        (NOW - dt.timedelta(days=7), NOW, "weekly"),  # граница: ровно 7 дней — ещё weekly
-        (NOW - dt.timedelta(days=7, hours=1), NOW, "monthly"),  # больше недели — monthly
-        (NOW - dt.timedelta(days=30), NOW, "monthly"),
+        # ровно сутки назад — два календарных дня
+        (NOW - dt.timedelta(days=1), NOW, [dt.date(2026, 8, 27), dt.date(2026, 8, 28)]),
+        # длинный простой — план на весь диапазон дней, по возрастанию, без пропусков
+        (
+            dt.datetime(2026, 8, 24, 10, 0, tzinfo=MOSCOW_TZ),
+            dt.datetime(2026, 9, 2, 12, 0, tzinfo=MOSCOW_TZ),
+            [
+                dt.date(2026, 8, 24),
+                dt.date(2026, 8, 25),
+                dt.date(2026, 8, 26),
+                dt.date(2026, 8, 27),
+                dt.date(2026, 8, 28),
+                dt.date(2026, 8, 29),
+                dt.date(2026, 8, 30),
+                dt.date(2026, 8, 31),
+                dt.date(2026, 9, 1),
+                dt.date(2026, 9, 2),
+            ],
+        ),
     ],
 )
-def test_select_period_by_window_size(
-    window_start: dt.datetime, now: dt.datetime, expected_period: str
+def test_build_day_plan(
+    window_start: dt.datetime, now: dt.datetime, expected_days: list[dt.date]
 ) -> None:
-    assert select_period(window_start, now) == expected_period
+    assert build_day_plan(window_start, now) == expected_days
+
+
+def test_build_day_plan_converts_non_moscow_tz_to_moscow_calendar_day() -> None:
+    # window_start в UTC 23:30 — уже следующий календарный день по МСК (+3), план должен
+    # это учитывать, а не брать календарную дату в исходном часовом поясе аргумента.
+    window_start = dt.datetime(2026, 8, 27, 23, 30, tzinfo=dt.timezone.utc)  # 28.08, 02:30 МСК
+    now = dt.datetime(2026, 8, 28, 6, 0, tzinfo=dt.timezone.utc)  # 28.08, 09:00 МСК
+
+    assert build_day_plan(window_start, now) == [dt.date(2026, 8, 28)]

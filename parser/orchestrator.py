@@ -47,28 +47,13 @@ from parser.state import fetch_window_start, mark_source_failed, mark_source_pro
 log = logging.getLogger(__name__)
 
 MAX_PAGES_PER_SOURCE = 5  # защита от бесконечной пагинации; окна обхода небольшие
-# docs/SPEC_pravo_gov_pagination_depth.md, п.1: pravo_gov отдаёт ~2500 док/неделю
-# (~84 стр. по 30 позиций) — общий предохранитель в 5 страниц физически недосягаем до
-# начала окна поиска при catch-up на несколько дней. Останов по-прежнему в первую
-# очередь по дате (ниже), счётчик — только верхняя защита от зависшей пагинации.
-PRAVO_GOV_MAX_PAGES = 100  # фолбэк, если period почему-то не резолвится (не должно случаться)
-# docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: единый потолок в 100 страниц был
-# откалиброван по живой проверке `weekly` (~2520 док = 84 стр.) и подставлялся для ЛЮБОГО
-# period, включая `monthly` — объём которого живьём не проверялся. Расчёт от того же
-# живого числа: ~2520 док/неделю ≈ 360 док/день ≈ 12 стр./день при 30 док/стр. — отсюда
-# per-period потолки ниже (тот же запас ×~1.2, что и у `weekly`: 84 факт. стр. → 100).
-# `monthly` — расчётная, не живая величина (пункт открытого вопроса AGENTS.md №3/№7:
-# перепроверить вживую при появлении доступа) — 30 дн. × 12 стр./день ≈ 360, потолок 450.
-# Даже если оценка ошибочна в меньшую сторону, самоисцеление есть: не покрытое окно не
-# отмечается обработанным (см. process_source), а при следующем суточном прогоне span
-# только растёт — `daily`/`weekly` эскалируются в `weekly`/`monthly` автоматически
-# (parser/sources/pravo_gov.py::select_period), не залипая на заниженном потолке навсегда.
-PRAVO_GOV_MAX_PAGES_BY_PERIOD = {
-    "daily": 20,  # запас над расчётными ~12 стр./день — daily теперь выбирается только
-    # для окна внутри одного календарного дня МСК (ревью п.1), обычно куда меньше суток
-    "weekly": 100,  # как раньше — покрывает живьём проверенные ~2520 док (84 стр.)
-    "monthly": 450,  # расчётная оценка (см. выше), не проверена вживую
-}
+# docs/SPEC_pravo_gov_day_by_day.md: эскалация periodType daily->weekly->monthly
+# (docs/SPEC_pravo_gov_pagination_depth.md) заменена обходом по календарным дням МСК
+# (`periodType=day&date=DD.MM.YYYY`) — `weekly`/`monthly` физически не окно "последние
+# N дней от now", а фиксированный текущий период, недостижимый для catch-up старше
+# текущей недели/месяца (диагностика 02.09, /tmp/claude_pravo_diag.md). Живьём — ~150
+# документов/день (~5 стр. по 30 позиций), потолок с запасом.
+PRAVO_GOV_DAY_MAX_PAGES = 30
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,23 +61,19 @@ class SourceSpec:
     source_key: str
     fetch_page: Callable[..., list[Publication]]  # fetch_page(page=N) -> [Publication, ...]
     paginated: bool = True  # False — источник без пагинации (напр. RSS), одна страница
-    max_pages: int = MAX_PAGES_PER_SOURCE  # используется, если max_pages_by_period не задан
-    # или не содержит текущий period (для source без per-period объёма — как раньше).
-    # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: единый max_pages не различал
-    # period — daily/weekly/monthly у pravo_gov отличаются по объёму на порядок. Если
-    # задан, потолок берётся по текущему period (пересчитывается при фолбэке period,
-    # см. process_source) — None у источников без понятия периода.
-    max_pages_by_period: dict[str, int] | None = None
+    max_pages: int = MAX_PAGES_PER_SOURCE  # предохранитель классической (не по дням) пагинации
     # docs/SPEC_pravo_gov_pagination_depth.md, п.1: допуск на неидеальную сортировку
     # листинга источника — публикация старше окна на величину до допуска ещё не
     # останавливает обход (0 для большинства источников — сохраняет прежнее поведение).
     window_tolerance: dt.timedelta = dt.timedelta(0)
-    # docs/SPEC_pravo_gov_pagination_depth.md, п.2: адаптивный periodType по размеру
-    # окна пропуска, чистая функция даты — None у источников без понятия периода.
-    resolve_period: Callable[[dt.datetime, dt.datetime], str] | None = None
-    # docs/SPEC_pravo_gov_pagination_depth.md, п.3: фолбэк периода, если первая страница
-    # с выбранным period пуста (напр. "daily" в моменте ничего не отдал) — {period: fallback}.
-    period_fallback: dict[str, str] | None = None
+    # docs/SPEC_pravo_gov_day_by_day.md: источники с обходом по календарным дням (МСК),
+    # а не классической пагинацией по "текущему периоду" (см. PRAVO_GOV_DAY_MAX_PAGES
+    # выше — periodType=weekly/monthly на pravo.gov.ru оказался нерабочим для catch-up).
+    # Если задано — process_source игнорирует max_pages/window_tolerance/paginated и
+    # обходит `day_plan(window_start, now)` день за днём, каждый со своим предохранителем
+    # `day_max_pages`. None у источников без понятия календарного дня (как раньше).
+    day_plan: Callable[[dt.datetime, dt.datetime], list[dt.date]] | None = None
+    day_max_pages: int = PRAVO_GOV_DAY_MAX_PAGES
 
 
 @dataclasses.dataclass
@@ -122,18 +103,11 @@ def build_source_specs(*, ru_proxy_url: str | None = None) -> list[SourceSpec]:
         SourceSpec(msupport_dszn.SOURCE_KEY, msupport_dszn.fetch_news),
         SourceSpec(
             pravo_gov.SOURCE_KEY,
-            lambda page=1, period="daily": pravo_gov.fetch_documents(
-                page=page, period=period, ru_proxy_url=ru_proxy_url
+            lambda page=1, period="day", date=None: pravo_gov.fetch_documents(
+                page=page, period=period, date=date, ru_proxy_url=ru_proxy_url
             ),
-            max_pages=PRAVO_GOV_MAX_PAGES,
-            max_pages_by_period=PRAVO_GOV_MAX_PAGES_BY_PERIOD,
-            window_tolerance=dt.timedelta(days=1),
-            resolve_period=pravo_gov.select_period,
-            # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: цепочка эскалации, не
-            # только daily->weekly — тот же семантический разрыв "period пуст на первой
-            # странице, хотя окно непусто" в принципе может повториться и на weekly
-            # (после простоя >7 дней, где weekly сама по себе оказалась бы неполной).
-            period_fallback={"daily": "weekly", "weekly": "monthly"},
+            day_plan=pravo_gov.build_day_plan,
+            day_max_pages=PRAVO_GOV_DAY_MAX_PAGES,
         ),
         SourceSpec(
             kremlin.SOURCE_KEY, lambda page=1: kremlin.fetch_news(page=page, ru_proxy_url=ru_proxy_url)
@@ -167,94 +141,15 @@ def process_source(
     window_start = fetch_window_start(session, spec.source_key, now=now)
 
     result = SourceRunResult(source_key=spec.source_key, ok=True)
-    # docs/SPEC_pravo_gov_pagination_depth.md, п.3: период выбирается один раз на весь
-    # прогон источника (не пересчитывается по страницам — иначе индекс страницы плыл бы
-    # относительно уже пройденных, если бы период сменился в середине пагинации).
-    period = spec.resolve_period(window_start, now) if spec.resolve_period is not None else None
-    # docs/SPEC_pravo_gov_pagination_depth.md, ревью п.2: потолок страниц теперь
-    # per-period (SourceSpec.max_pages_by_period) — daily/weekly/monthly у pravo_gov
-    # отличаются по объёму на порядок, единый потолок либо избыточен для daily, либо
-    # недостаточен для monthly. Пересчитывается при фолбэке period (ниже), т.к. смена
-    # period меняет и допустимый объём.
-    max_pages = (spec.max_pages_by_period or {}).get(period, spec.max_pages) if period is not None else spec.max_pages
-    window_covered = True  # остаётся True при явном break, False — если цикл исчерпал
-    # max_pages, не подтвердив достижение начала окна (см. п.1 спеки)
+    window_covered = True  # остаётся True, только если обход подтвердил полное покрытие окна
     try:
-        page = 1
-        while page <= max_pages:
-            fetch_kwargs: dict = {"page": page}
-            if period is not None:
-                fetch_kwargs["period"] = period
-            publications = spec.fetch_page(**fetch_kwargs)
-
-            # docs/SPEC_pravo_gov_pagination_depth.md, п.3: пустая первая страница на
-            # текущем period — не обязательно «публикаций нет», может быть, что period
-            # ещё не проиндексирован источником (напр. daily в моменте пуст, хотя
-            # публикации за сегодня уже есть в weekly) — фолбэк, не потеряв день молча.
-            if not publications and page == 1 and period is not None and spec.period_fallback:
-                fallback_period = spec.period_fallback.get(period)
-                if fallback_period is not None:
-                    log.info(
-                        "источник %s: period=%s пуст на первой странице, фолбэк на period=%s",
-                        spec.source_key,
-                        period,
-                        fallback_period,
-                    )
-                    period = fallback_period
-                    max_pages = (spec.max_pages_by_period or {}).get(period, spec.max_pages)
-                    publications = spec.fetch_page(page=page, period=period)
-
-            if not publications:
-                break
-
-            reached_window_start = False
-            for pub in publications:
-                if pub.published_at is not None and pub.published_at < window_start - spec.window_tolerance:
-                    # Публикации идут от новых к старым — как только встретили одну
-                    # старше окна, все следующие в этой странице тоже старше, дальше
-                    # не проверяем (не только эту страницу — весь источник, ниже).
-                    reached_window_start = True
-                    log.debug(
-                        "публикация старше окна поиска (%s < %s), обход источника остановлен: %r",
-                        pub.published_at,
-                        window_start,
-                        pub.title,
-                    )
-                    break
-                _process_publication(session, classifier, pub, whitelisted_domains, result, now, llm_client)
-
-            # PLAN.md Фаза 9 п.1 / docs/SPEC_stale_publications_filter.md: если ни одна
-            # публикация на странице не дала машиночитаемую дату, проверка «старше окна»
-            # выше вообще не срабатывает — без этой защиты обход мог бы бесконтрольно
-            # углубляться в пагинацию на источниках, где разметка старых страниц не
-            # содержит даты (риск многолетних публикаций, прошедших как «новые»).
-            all_undated = bool(publications) and all(pub.published_at is None for pub in publications)
-            if all_undated:
-                log.warning(
-                    "источник %s: страница %d полностью без дат публикации — "
-                    "обход источника остановлен (не может подтвердить окно поиска)",
-                    spec.source_key,
-                    page,
-                )
-
-            if reached_window_start or all_undated or not spec.paginated:
-                break
-
-            page += 1
+        if spec.day_plan is not None:
+            window_covered = _process_source_by_day(
+                session, classifier, spec, window_start, now, whitelisted_domains, result, llm_client
+            )
         else:
-            # docs/SPEC_pravo_gov_pagination_depth.md, п.1: предохранитель max_pages
-            # сработал раньше, чем обход подтвердил достижение начала окна — часть окна
-            # может остаться необойдённой, источник НЕ отмечается обработанным ниже
-            # (доверстывание подхватит его на следующем прогоне с тем же window_start).
-            window_covered = False
-            log.warning(
-                "источник %s: достигнут предохранитель страниц (%d, period=%s) раньше "
-                "начала окна поиска (%s) — источник не отмечен обработанным, "
-                "доверстывание при следующем прогоне",
-                spec.source_key,
-                max_pages,
-                period,
-                window_start,
+            window_covered = _process_source_paginated(
+                session, classifier, spec, window_start, now, whitelisted_domains, result, llm_client
             )
     except SourceUnavailable as exc:
         # AGENTS.md раздел 12: «Источник недоступен — 3 попытки, затем пропуск до
@@ -277,6 +172,128 @@ def process_source(
     if window_covered:
         mark_source_processed(session, spec.source_key, success_at=now)
     return result
+
+
+def _process_source_paginated(
+    session: Session,
+    classifier: Classifier,
+    spec: SourceSpec,
+    window_start: dt.datetime,
+    now: dt.datetime,
+    whitelisted_domains: set[str],
+    result: SourceRunResult,
+    llm_client: ClassifierLLMClient | None,
+) -> bool:
+    """Классический обход источника постраничной пагинацией, стоп по дате/предохранителю
+    страниц (docs/SPEC_pravo_gov_pagination_depth.md, п.1) — всё, кроме pravo_gov
+    (см. `_process_source_by_day` и `SourceSpec.day_plan`)."""
+    page = 1
+    while page <= spec.max_pages:
+        publications = spec.fetch_page(page=page)
+        if not publications:
+            break
+
+        reached_window_start = False
+        for pub in publications:
+            if pub.published_at is not None and pub.published_at < window_start - spec.window_tolerance:
+                # Публикации идут от новых к старым — как только встретили одну
+                # старше окна, все следующие в этой странице тоже старше, дальше
+                # не проверяем (не только эту страницу — весь источник, ниже).
+                reached_window_start = True
+                log.debug(
+                    "публикация старше окна поиска (%s < %s), обход источника остановлен: %r",
+                    pub.published_at,
+                    window_start,
+                    pub.title,
+                )
+                break
+            _process_publication(session, classifier, pub, whitelisted_domains, result, now, llm_client)
+
+        # PLAN.md Фаза 9 п.1 / docs/SPEC_stale_publications_filter.md: если ни одна
+        # публикация на странице не дала машиночитаемую дату, проверка «старше окна»
+        # выше вообще не срабатывает — без этой защиты обход мог бы бесконтрольно
+        # углубляться в пагинацию на источниках, где разметка старых страниц не
+        # содержит даты (риск многолетних публикаций, прошедших как «новые»).
+        all_undated = bool(publications) and all(pub.published_at is None for pub in publications)
+        if all_undated:
+            log.warning(
+                "источник %s: страница %d полностью без дат публикации — "
+                "обход источника остановлен (не может подтвердить окно поиска)",
+                spec.source_key,
+                page,
+            )
+
+        if reached_window_start or all_undated or not spec.paginated:
+            return True
+
+        page += 1
+
+    # docs/SPEC_pravo_gov_pagination_depth.md, п.1: предохранитель max_pages сработал
+    # раньше, чем обход подтвердил достижение начала окна — часть окна может остаться
+    # необойдённой, источник НЕ отмечается обработанным (доверстывание подхватит его на
+    # следующем прогоне с тем же window_start). Естественный конец листинга (пустая
+    # страница) уже вернул True выше, до этой строки.
+    if page > spec.max_pages:
+        log.warning(
+            "источник %s: достигнут предохранитель страниц (%d) раньше начала окна "
+            "поиска (%s) — источник не отмечен обработанным, доверстывание при "
+            "следующем прогоне",
+            spec.source_key,
+            spec.max_pages,
+            window_start,
+        )
+        return False
+    return True
+
+
+def _process_source_by_day(
+    session: Session,
+    classifier: Classifier,
+    spec: SourceSpec,
+    window_start: dt.datetime,
+    now: dt.datetime,
+    whitelisted_domains: set[str],
+    result: SourceRunResult,
+    llm_client: ClassifierLLMClient | None,
+) -> bool:
+    """docs/SPEC_pravo_gov_day_by_day.md: обход по календарным дням МСК вместо эскалации
+    periodType daily->weekly->monthly (docs/SPEC_pravo_gov_pagination_depth.md) —
+    диагностика 02.09 (/tmp/claude_pravo_diag.md) показала, что `periodType=weekly/
+    monthly` на pravo.gov.ru — фиксированный текущий календарный период, а не окно
+    "последние N дней от now", и физически не отдаёт документы старше текущей недели/
+    месяца ни на какой странице. `periodType=day&date=DD.MM.YYYY` — единственный
+    подтверждённый вживую способ достать произвольный день из прошлого.
+
+    Каждый день `spec.day_plan(window_start, now)` пагинируется отдельно, со своим
+    предохранителем `spec.day_max_pages`. Окно считается покрытым, только если КАЖДЫЙ
+    день дошёл до естественного конца листинга (пустая страница) — если хотя бы один
+    день исчерпал предохранитель, источник в целом не отмечается обработанным (весь
+    диапазон дней будет повторён на следующем прогоне; дедуп по URL делает повтор
+    дешёвым для уже полностью обойдённых дней)."""
+    window_covered = True
+    for day in spec.day_plan(window_start, now):
+        date_str = day.strftime("%d.%m.%Y")
+        page = 1
+        day_covered = False
+        while page <= spec.day_max_pages:
+            publications = spec.fetch_page(page=page, period="day", date=date_str)
+            if not publications:
+                day_covered = True
+                break
+            for pub in publications:
+                _process_publication(session, classifier, pub, whitelisted_domains, result, now, llm_client)
+            page += 1
+
+        if not day_covered:
+            window_covered = False
+            log.warning(
+                "источник %s: день %s — исчерпан предохранитель страниц (%d), день не "
+                "покрыт полностью, источник не будет отмечен обработанным",
+                spec.source_key,
+                date_str,
+                spec.day_max_pages,
+            )
+    return window_covered
 
 
 def _process_publication(
