@@ -142,6 +142,12 @@ class SourceState(Base):
     source_key: Mapped[str] = mapped_column(String(128), primary_key=True)  # напр. "mintrud.gov.ru/docs"
     last_success_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime, default=None)
     last_seen_publication_date: Mapped[dt.date | None] = mapped_column(default=None)
+    # docs/SPEC_source_health_alert.md: последняя попытка обхода (успешная или нет) и
+    # счётчик подряд идущих неудач — без них last_success_at=None неотличим от «источник
+    # ни разу не пытались обойти» (нет данных для алерта) от «пытались, но не смогли»
+    # (повод для алерта).
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(UTCDateTime, default=None)
+    consecutive_failures: Mapped[int] = mapped_column(default=0)
     updated_at: Mapped[dt.datetime] = mapped_column(UTCDateTime, default=_utcnow, onupdate=_utcnow)
 
 

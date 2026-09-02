@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # что перезаливается одновременно с копией в npa-somas (инвариант, см. спеку).
     benefits_knowledge_base_path: str = "data/benefits_knowledge_base.json"
 
+    # Дедуп алерта о деградации источников (docs/SPEC_source_health_alert.md) — TTL 24ч
+    # хранится тут, а не в БД, чтобы не тянуть отдельную таблицу/колонку под одноразовую
+    # отметку "уже слали".
+    health_alert_state_path: str = "data/health_alerts_state.json"
+
     @property
     def allowed_user_ids(self) -> set[int]:
         if not self.allowed_telegram_user_ids.strip():

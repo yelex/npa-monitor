@@ -27,6 +27,14 @@ from aiogram.types import (
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from bot.autoupdate_client import AutoUpdateAgentClient, archive_result, list_pending_results, task_path
+from bot.health_alerts import (
+    check_source_health,
+    check_zero_signal_degradation,
+    format_alert,
+    format_zero_signal_alert,
+    sources_due_for_alert,
+    zero_signal_alert_due,
+)
 from config import get_settings
 from db.catalog import RegionEntry, access_for_domain, all_domains, load_regions
 from db.enums import (
@@ -1241,9 +1249,40 @@ async def send_digest(bot: Bot) -> None:
             await bot.send_message(uid, signal_card(s, cats), reply_markup=signal_kb(s.id))
 
 
+async def _send_health_alert_if_needed(bot: Bot) -> None:
+    """docs/SPEC_source_health_alert.md: перед утренней сводкой — отдельными первыми
+    сообщениями ⚠️-алерты, если сработал хотя бы один из двух триггеров: (1) есть
+    источники с деградацией (>=2 неудачные попытки обхода подряд за последние 24ч), (2)
+    прогон не дал новых сигналов за сутки И ни один ЖС-значимый источник не обходился
+    успешно за то же окно. Дедуп по TTL на каждый триггер отдельно — не спамить одним и
+    тем же алертом каждый digest."""
+    with get_session_factory()() as db:
+        unhealthy = check_source_health(db)
+        zero_signal = check_zero_signal_degradation(db)
+
+    state_path = Path(get_settings().health_alert_state_path)
+    messages = []
+    if unhealthy:
+        due = sources_due_for_alert(unhealthy, state_path=state_path)
+        if due:
+            messages.append(format_alert(due))
+    if zero_signal and zero_signal_alert_due(state_path=state_path):
+        messages.append(format_zero_signal_alert())
+
+    if not messages:
+        return
+    for uid in get_settings().allowed_user_ids:
+        for text in messages:
+            await bot.send_message(uid, text)
+
+
 async def _digest_loop(bot: Bot) -> None:
     while True:
         await asyncio.sleep(_seconds_until_next(DIGEST_HOUR))
+        try:
+            await _send_health_alert_if_needed(bot)
+        except Exception:  # noqa: BLE001
+            log.exception("health alert error")
         try:
             await send_digest(bot)
         except Exception:  # noqa: BLE001

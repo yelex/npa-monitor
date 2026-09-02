@@ -31,7 +31,7 @@ from db.enums import (
     SignalType,
 )
 from db.models import MeasureOverride, SignalResult
-from db.service import create_signal, transition_status
+from db.service import create_signal, record_source_failure, transition_status, update_source_state
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +40,7 @@ def _isolated_bot_state(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setenv("ALLOWED_TELEGRAM_USER_IDS", "111")
     monkeypatch.setenv("AUTOUPDATE_SPOOL_DIR", str(tmp_path / "autoupdate_spool"))
+    monkeypatch.setenv("HEALTH_ALERT_STATE_PATH", str(tmp_path / "health_alerts_state.json"))
     bot_main.get_settings.cache_clear()
     bot_main._session_factory = None
     yield
@@ -2194,3 +2195,125 @@ async def test_postponed_signal_appears_in_next_digest() -> None:
     await bot_main.send_digest(bot)
 
     assert bot.send_message.await_args_list[0].args == (111, "📬 Утренняя сводка: 1 сигналов")
+
+
+# --- Алерт о деградации источников (docs/SPEC_source_health_alert.md) ---
+
+
+async def test_send_health_alert_sends_nothing_when_all_sources_healthy() -> None:
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main._send_health_alert_if_needed(bot)
+
+    bot.send_message.assert_not_awaited()
+
+
+async def test_send_health_alert_notifies_before_digest_on_degraded_source() -> None:
+    """Спека: «если есть больные — первой сообщением отправить ⚠️ сводку», затем digest
+    идёт как обычно (`_digest_loop` вызывает оба шага по порядку)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    source_key = "publication.pravo.gov.ru"
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        record_source_failure(db, source_key=source_key, attempt_at=now - dt.timedelta(hours=2))
+        record_source_failure(db, source_key=source_key, attempt_at=now - dt.timedelta(hours=1))
+        # kremlin.ru успешен недавно — держит второй триггер (0 сигналов + ни один
+        # ЖС-значимый источник не обходился успешно) молчащим, изолирует этот тест на
+        # первом триггере (per-источник деградация).
+        update_source_state(db, source_key="kremlin.ru/acts/news", success_at=now)
+        db.commit()
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main._send_health_alert_if_needed(bot)
+
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.args[1]
+    assert "publication.pravo.gov.ru" in text
+    assert "⚠️" in text
+
+
+async def test_send_health_alert_does_not_repeat_within_ttl() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        record_source_failure(db, source_key="kremlin.ru/acts/news", attempt_at=now - dt.timedelta(hours=2))
+        record_source_failure(db, source_key="kremlin.ru/acts/news", attempt_at=now - dt.timedelta(hours=1))
+        # government.ru успешен недавно — держит второй триггер молчащим, изолирует этот
+        # тест на дедупе первого (per-источник).
+        update_source_state(db, source_key="government.ru/docs", success_at=now)
+        db.commit()
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    await bot_main._send_health_alert_if_needed(bot)
+    assert bot.send_message.await_count == 1
+
+    bot.send_message.reset_mock()
+    await bot_main._send_health_alert_if_needed(bot)  # тот же прогон, состояние не изменилось
+
+    bot.send_message.assert_not_awaited()
+
+
+async def test_send_health_alert_notifies_on_zero_signal_run_with_no_significant_success() -> None:
+    """Второй триггер спеки: 0 новых сигналов и ни один ЖС-значимый источник не обходился
+    успешно за 24ч — алерт даже если ни один источник не набрал 2 неудачи подряд (здесь
+    вообще ровно одна попытка, `check_source_health` бы промолчал)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        record_source_failure(
+            db, source_key="publication.pravo.gov.ru", attempt_at=now - dt.timedelta(hours=1)
+        )
+        db.commit()
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main._send_health_alert_if_needed(bot)
+
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.await_args.args[1]
+    assert "⚠️" in text
+    assert "publication.pravo.gov.ru" in text
+
+
+async def test_send_health_alert_sends_both_messages_when_both_triggers_fire() -> None:
+    """`_digest_loop` должен отправить per-источник алерт первым сообщением, затем
+    zero-signal алерт — оба триггера могут сработать одновременно на одном и том же
+    прогоне (например, единственный значимый источник сам и деградировал)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    source_key = "publication.pravo.gov.ru"
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        record_source_failure(db, source_key=source_key, attempt_at=now - dt.timedelta(hours=2))
+        record_source_failure(db, source_key=source_key, attempt_at=now - dt.timedelta(hours=1))
+        db.commit()
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main._send_health_alert_if_needed(bot)
+
+    assert bot.send_message.await_count == 2
+    first_text = bot.send_message.await_args_list[0].args[1]
+    second_text = bot.send_message.await_args_list[1].args[1]
+    assert "Деградация источников" in first_text
+    assert "не найдено ни одного нового сигнала" in second_text
+
+
+async def test_send_health_alert_silent_on_zero_signals_when_significant_source_succeeded() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        update_source_state(db, source_key="kremlin.ru/acts/news", success_at=now - dt.timedelta(hours=1))
+        db.commit()
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    await bot_main._send_health_alert_if_needed(bot)
+
+    bot.send_message.assert_not_awaited()

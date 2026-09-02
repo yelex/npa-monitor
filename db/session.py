@@ -21,6 +21,9 @@ _COLUMNS_ADDED_AFTER_INITIAL_SCHEMA = (
     # docs/SPEC_signal_type_measure_select.md: тип сигнала + row_hash выбранной меры.
     ("signals", "signal_type", "VARCHAR(16)"),
     ("signals", "measure_row_hash", "VARCHAR(64)"),
+    # docs/SPEC_source_health_alert.md: последняя попытка обхода + счётчик неудач подряд.
+    ("sources_state", "last_attempt_at", "DATETIME"),
+    ("sources_state", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 

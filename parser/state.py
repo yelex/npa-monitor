@@ -13,7 +13,7 @@ import datetime as dt
 from sqlalchemy.orm import Session
 
 from db.models import SourceState
-from db.service import update_source_state
+from db.service import record_source_failure, update_source_state
 
 FIRST_RUN_WINDOW = dt.timedelta(days=7)
 
@@ -48,4 +48,14 @@ def mark_source_processed(
         source_key=source_key,
         success_at=success_at or dt.datetime.now(dt.timezone.utc),
         last_seen_publication_date=last_seen_publication_date,
+    )
+
+
+def mark_source_failed(
+    session: Session, source_key: str, *, at: dt.datetime | None = None
+) -> SourceState:
+    """Отмечает неудачную попытку обхода источника (docs/SPEC_source_health_alert.md,
+    обёртка над `db.service.record_source_failure`)."""
+    return record_source_failure(
+        session, source_key=source_key, attempt_at=at or dt.datetime.now(dt.timezone.utc)
     )

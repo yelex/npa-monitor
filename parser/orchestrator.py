@@ -42,7 +42,7 @@ from parser.llm_priority import apply_refinements, chunk_signal_ids, log_refinem
 from parser.models import Publication
 from parser.signals import build_signal
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
-from parser.state import fetch_window_start, mark_source_processed
+from parser.state import fetch_window_start, mark_source_failed, mark_source_processed
 
 log = logging.getLogger(__name__)
 
@@ -261,6 +261,7 @@ def process_source(
         # обработанным, чтобы окно в следующий раз включило пропущенный период
         # (доверстывание, parser/state.py).
         log.warning("источник недоступен, пропуск до следующего цикла: %s", exc)
+        mark_source_failed(session, spec.source_key, at=now)
         return SourceRunResult(source_key=spec.source_key, ok=False, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         # Любая другая ошибка одного источника (неверная конфигурация вроде отсутствующего
@@ -269,6 +270,7 @@ def process_source(
         # pravo_gov прерывал обход всех источников после него. С полным traceback в лог
         # (не как SourceUnavailable — это неожиданная ошибка, а не штатный «сайт лежит»).
         log.exception("неожиданная ошибка при обходе источника %s, пропуск", spec.source_key)
+        mark_source_failed(session, spec.source_key, at=now)
         return SourceRunResult(source_key=spec.source_key, ok=False, error=str(exc))
 
     if window_covered:

@@ -179,7 +179,26 @@ def update_source_state(
         session.add(state)
 
     state.last_success_at = success_at
+    state.last_attempt_at = success_at
+    state.consecutive_failures = 0
     if last_seen_publication_date is not None:
         state.last_seen_publication_date = last_seen_publication_date
+    session.flush()
+    return state
+
+
+def record_source_failure(session: Session, *, source_key: str, attempt_at: dt.datetime) -> SourceState:
+    """Upsert неудачной попытки обхода источника (docs/SPEC_source_health_alert.md).
+
+    В отличие от `update_source_state` не трогает `last_success_at` — только фиксирует
+    факт попытки и увеличивает счётчик подряд идущих неудач, который бот использует для
+    алерта о деградации источника."""
+    state = session.get(SourceState, source_key)
+    if state is None:
+        state = SourceState(source_key=source_key)
+        session.add(state)
+
+    state.last_attempt_at = attempt_at
+    state.consecutive_failures = (state.consecutive_failures or 0) + 1
     session.flush()
     return state

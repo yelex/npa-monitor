@@ -476,6 +476,34 @@ def test_process_source_marks_unavailable_source_without_processing(
     assert result.error is not None
 
 
+def test_process_source_records_failure_on_unavailable_source(
+    session: Session, classifier: Classifier
+) -> None:
+    """docs/SPEC_source_health_alert.md: неудачная попытка обхода должна фиксироваться в
+    `SourceState.consecutive_failures`/`last_attempt_at`, иначе боту нечего проверять для
+    алерта о деградации — без успешного обхода `last_success_at` остаётся None."""
+
+    def fetch_page(page: int = 1):
+        raise SourceUnavailable(url="https://sfr.gov.ru/", access="direct", last_error=Exception("boom"))
+
+    spec = SourceSpec("sfr.gov.ru/press_center/news", fetch_page)
+
+    process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    state = session.get(SourceState, "sfr.gov.ru/press_center/news")
+    assert state is not None
+    assert state.consecutive_failures == 1
+    assert state.last_attempt_at == NOW
+    assert state.last_success_at is None
+
+    process_source(session, classifier, spec, now=NOW + dt.timedelta(hours=1))
+    session.commit()
+
+    state = session.get(SourceState, "sfr.gov.ru/press_center/news")
+    assert state.consecutive_failures == 2  # подряд, второй неудачный обход
+
+
 def test_process_source_catches_unexpected_errors_not_just_source_unavailable(
     session: Session, classifier: Classifier
 ) -> None:

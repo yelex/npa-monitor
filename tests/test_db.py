@@ -317,6 +317,44 @@ def test_init_db_adds_signal_type_and_measure_row_hash_columns_to_pre_existing_s
         assert row.measure_row_hash is None
 
 
+def test_init_db_adds_last_attempt_at_and_consecutive_failures_to_pre_existing_sources_state_table(tmp_path):
+    # docs/SPEC_source_health_alert.md: sources_state на уже развёрнутой боевой БД (без
+    # Alembic) существует без колонок last_attempt_at/consecutive_failures — init_db
+    # должен добавить их и не потерять уже накопленные строки.
+    from sqlalchemy import text as sql_text
+
+    engine = make_engine(tmp_path / "legacy_sources_state.db")
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                "CREATE TABLE sources_state ("
+                "source_key VARCHAR(128) PRIMARY KEY, last_success_at DATETIME, "
+                "last_seen_publication_date DATE, updated_at DATETIME)"
+            )
+        )
+        conn.execute(
+            sql_text(
+                "INSERT INTO sources_state (source_key, last_success_at, updated_at) "
+                "VALUES ('mintrud.gov.ru/docs', '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+            )
+        )
+
+    init_db(engine)
+
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(sources_state)")}
+        assert {"last_attempt_at", "consecutive_failures"} <= columns
+        row = conn.execute(
+            sql_text(
+                "SELECT source_key, last_attempt_at, consecutive_failures FROM sources_state "
+                "WHERE source_key = 'mintrud.gov.ru/docs'"
+            )
+        ).one()
+        assert row.source_key == "mintrud.gov.ru/docs"
+        assert row.last_attempt_at is None  # старая строка — попытка не восстановлена миграцией
+        assert row.consecutive_failures == 0  # DEFAULT 0 из ALTER TABLE
+
+
 def test_source_state_upsert(session: Session):
     now = dt.datetime.now(dt.timezone.utc)
     update_source_state(session, source_key="mintrud.gov.ru/docs", success_at=now)
