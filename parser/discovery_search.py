@@ -81,7 +81,7 @@ from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable, fetch
 from parser.filters import is_domain_whitelisted
 from parser.models import Publication
-from parser.signals import build_signal, is_review
+from parser.signals import build_signal, is_review_aggregate
 from parser.state import fetch_window_start, mark_source_processed
 
 # Не `logging.getLogger(__name__)`: запущенный как `python -m parser.discovery_search`
@@ -339,8 +339,9 @@ def run_discovery_search(
             # docs/SPEC_review_filter_discovery.md: тот же фильтр обзоров/агрегаторов,
             # что и в оркестраторе (`parser/orchestrator.py::_process_publication`) — до
             # `_fetch_full_title`, чтобы не тянуть заголовок страницы, которая всё равно
-            # будет отброшена.
-            if is_review(trace.result):
+            # будет отброшена. Инцидент #296: `is_review_aggregate` дополнительно ловит
+            # обзорные URL/заголовки, которые `detect_event_type` не распознал как REVIEW.
+            if is_review_aggregate(pub, trace.result):
                 result.reviews += 1
                 log.debug("  отфильтровано: обзор (без конкретики)")
                 continue

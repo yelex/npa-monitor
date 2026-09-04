@@ -128,6 +128,54 @@ def test_process_source_creates_signal_for_review_with_event_marker(
     assert session.query(Signal).count() == 1
 
 
+def test_process_source_skips_review_aggregate_by_url_pattern(session: Session, classifier: Classifier) -> None:
+    # docs/specs/SPEC_review_filter_discovery.md, инцидент #296: заголовок обзора
+    # КонсультантПлюс сам содержит маркер события 5.4 ("законодательства" -> "изменение"
+    # в исходном инциденте), поэтому detect_event_type даёт AMENDMENT, а не REVIEW, и
+    # голый is_review не срабатывает. is_review_aggregate ловит это по url `/law/review/`.
+    publications = [
+        Publication(
+            source_key="consultant.ru/rss/hotdocs.xml",
+            title="Новое в московском законодательстве (ежедневно). Выпуск за 3 сентября 2026 года"
+            " \\ Обзоры законодательства \\ КонсультантПлюс",
+            url="https://www.consultant.ru/law/review/reg/md2026-09-03.html",
+            published_at=NOW,
+            summary="ветеран боевых действий выплата льгота инвалид пособие изменение закона",
+        )
+    ]
+    spec = SourceSpec("consultant.ru/rss/hotdocs.xml", lambda page=1: publications if page == 1 else [])
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 0
+    assert result.reviews == 1
+    assert session.query(Signal).count() == 0
+
+
+def test_process_source_creates_signal_for_consultant_publication_without_review_pattern(
+    session: Session, classifier: Classifier
+) -> None:
+    # Контроль: обычная публикация consultant.ru (не /law/review/, без обзорного
+    # заголовка) с маркером события по-прежнему создаёт сигнал.
+    publications = [
+        _pub(
+            "consultant.ru/rss/hotdocs.xml",
+            "постановление о мерах поддержки ветеранов боевых действий принято",
+            "https://www.consultant.ru/document/cons_doc_LAW_123456/",
+            published_at=NOW,
+        )
+    ]
+    spec = SourceSpec("consultant.ru/rss/hotdocs.xml", lambda page=1: publications if page == 1 else [])
+
+    result = process_source(session, classifier, spec, now=NOW)
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.reviews == 0
+    assert session.query(Signal).count() == 1
+
+
 def test_process_source_dedups_on_second_run(session: Session, classifier: Classifier) -> None:
     publications = [
         _pub(

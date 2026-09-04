@@ -275,6 +275,70 @@ def test_run_discovery_search_creates_signal_for_review_with_event_marker(
     assert session.query(Signal).count() == 1
 
 
+def test_run_discovery_search_skips_review_aggregate_by_url_pattern(
+    monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
+) -> None:
+    # docs/specs/SPEC_review_filter_discovery.md, инцидент #296: заголовок обзора
+    # КонсультантПлюс содержит маркер события 5.4, поэтому detect_event_type даёт
+    # AMENDMENT (не REVIEW), и голый is_review не срабатывает — is_review_aggregate
+    # ловит это по url `/law/review/`.
+    publications = [
+        _pub(
+            "https://www.consultant.ru/law/review/reg/md2026-09-03.html",
+            "Новое в московском законодательстве (ежедневно). Выпуск за 3 сентября 2026 года"
+            " \\ Обзоры законодательства \\ КонсультантПлюс",
+            summary="ветеран боевых действий выплата льгота инвалид пособие изменение закона",
+        )
+    ]
+    monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
+
+    result = run_discovery_search(
+        session,
+        classifier,
+        query="выплата",
+        date_from=dt.date(2025, 12, 1),
+        date_to=dt.date(2025, 12, 31),
+        api_key="key",
+        folder_id="folder",
+        domains={"consultant.ru"},
+    )
+    session.commit()
+
+    assert result.new_signals == 0
+    assert result.reviews == 1
+    assert session.query(Signal).count() == 0
+
+
+def test_run_discovery_search_creates_signal_for_consultant_publication_without_review_pattern(
+    monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
+) -> None:
+    # Контроль: обычная публикация consultant.ru (не /law/review/, без обзорного
+    # заголовка) с маркером события по-прежнему создаёт сигнал.
+    publications = [
+        _pub(
+            "https://www.consultant.ru/document/cons_doc_LAW_123456/",
+            "постановление о мерах поддержки ветеранов боевых действий принято",
+        )
+    ]
+    monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
+
+    result = run_discovery_search(
+        session,
+        classifier,
+        query="выплата",
+        date_from=dt.date(2025, 12, 1),
+        date_to=dt.date(2025, 12, 31),
+        api_key="key",
+        folder_id="folder",
+        domains={"consultant.ru"},
+    )
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.reviews == 0
+    assert session.query(Signal).count() == 1
+
+
 def test_run_discovery_search_skips_irrelevant_publication(
     monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
 ) -> None:

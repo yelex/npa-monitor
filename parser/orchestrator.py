@@ -40,7 +40,7 @@ from parser.filters import NOT_NPA_ACTIVITY_REASON, is_domain_whitelisted, is_ex
 from parser.llm import ClassifierLLMClient, get_default_client
 from parser.llm_priority import apply_refinements, chunk_signal_ids, log_refinement, refine_priorities_batch
 from parser.models import Publication
-from parser.signals import build_signal, is_review
+from parser.signals import build_signal, is_review_aggregate
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
 from parser.state import fetch_window_start, mark_source_failed, mark_source_processed
 
@@ -361,7 +361,9 @@ def _process_publication(
     # docs/SPEC_no_reviews_no_stale_reminders.md, п.1: обзоры/агрегаторы (нет маркера
     # события 5.4, `detect_event_type` вернул REVIEW) не содержат конкретики по
     # отдельной новости — сигнал не создаётся, публикация просто пропускается.
-    if is_review(trace.result):
+    # Инцидент #296: дополнительно ловим обзорные URL/заголовки, которые
+    # `detect_event_type` не распознал как REVIEW (см. `is_review_aggregate`).
+    if is_review_aggregate(pub, trace.result):
         result.reviews += 1
         log.debug("  отфильтровано: обзор (без конкретики)")
         return

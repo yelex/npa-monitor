@@ -20,6 +20,26 @@ def is_review(classification: ClassificationResult) -> bool:
     return classification.is_relevant and classification.event_type == EventType.REVIEW
 
 
+_REVIEW_URL_MARKER = "/law/review/"
+_REVIEW_TITLE_MARKERS = ("Обзоры законодательства", "Обзор законодательства")
+
+
+def is_review_aggregate(publication: Publication, classification: ClassificationResult) -> bool:
+    """Инцидент #296 (docs/SPEC_review_filter_discovery.md, backlog): `is_review` выше
+    завязан на `detect_event_type`, а заголовки обзоров КонсультантПлюс («Новое в
+    московском законодательстве... Выпуск за 3 сентября 2026 года \\ Обзоры
+    законодательства \\ КонсультантПлюс») сами содержат маркер 5.4 («законодательства»
+    матчится на «закон») — регекс-классификатор даёт AMENDMENT вместо REVIEW, и
+    `is_review` пропускает публикацию. Здесь — доп. проверка поверх `is_review` по
+    известным обзорным URL/заголовочным паттернам, независимо от того, что вернул
+    классификатор."""
+    if is_review(classification):
+        return True
+    if _REVIEW_URL_MARKER in publication.url:
+        return True
+    return any(marker in publication.title for marker in _REVIEW_TITLE_MARKERS)
+
+
 def build_signal(
     session: Session, publication: Publication, classification: ClassificationResult
 ) -> Signal | None:
