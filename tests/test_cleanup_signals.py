@@ -7,7 +7,15 @@ import datetime as dt
 import pytest
 from sqlalchemy.orm import Session
 
-from db.enums import REGION_RF, REGION_UNDEFINED, EventType, Priority, SignalCategory, SignalStatus
+from db.enums import (
+    REGION_RF,
+    REGION_UNDEFINED,
+    EventType,
+    Priority,
+    RejectionReason,
+    SignalCategory,
+    SignalStatus,
+)
 from db.models import Signal
 from db.service import create_signal, transition_status
 from db.session import init_db, make_engine, make_session_factory
@@ -86,16 +94,49 @@ def test_step_a_dry_run_does_not_change_status(session: Session, classifier: Cla
     assert signal.status == SignalStatus.NEW  # отчёт не применяет изменения
 
 
+def test_step_a2_rejects_review_signal_as_not_npa(session: Session, classifier: Classifier) -> None:
+    # docs/SPEC_review_filter_discovery.md, п.3: обзоры/агрегаторы, просочившиеся до
+    # фикса (в первую очередь через Yandex-discovery), — одноразовая чистка отклоняет
+    # их с NOT_NPA, не произвольной строкой в rejection_reason.
+    signal = _make_signal(
+        session,
+        title="Новое в законодательстве Рязанской области: мера поддержки ветеранов боевых действий, выплаты и льготы",
+        source_url="https://www.consultant.ru/law/review/reg/rlaw/rlaw0732026-08-28.html",
+    )
+
+    report = run_cleanup(session, classifier, apply=True)
+    session.refresh(signal)
+
+    assert len(report.reviews) == 1
+    assert report.reviews[0].signal_id == signal.id
+    assert signal.status == SignalStatus.REJECTED
+    assert signal.rejection_reason == RejectionReason.NOT_NPA
+
+
+def test_step_a2_keeps_signal_with_event_marker(session: Session, classifier: Classifier) -> None:
+    signal = _make_signal(
+        session,
+        title="постановление о мерах поддержки ветеранов боевых действий принято",
+        source_url="https://sfr.gov.ru/n/event-1",
+    )
+
+    report = run_cleanup(session, classifier, apply=True)
+    session.refresh(signal)
+
+    assert report.reviews == []
+    assert signal.status == SignalStatus.NEW
+
+
 def test_step_b1_dedups_by_canonical_url(session: Session, classifier: Classifier) -> None:
     keeper = _make_signal(
         session,
-        title="постановление ветеран боевых действий выплата",
+        title="постановление ветеран боевых действий выплата принята",
         source_url="https://publication.pravo.gov.ru/document/1?index=1",
         created_at=NOW,
     )
     dupe = _make_signal(
         session,
-        title="постановление ветеран боевых действий выплата",
+        title="постановление ветеран боевых действий выплата принята",
         source_url="http://www.publication.pravo.gov.ru/document/1?index=2",
         created_at=NOW + dt.timedelta(hours=1),
     )
@@ -113,13 +154,13 @@ def test_step_b1_dedups_by_canonical_url(session: Session, classifier: Classifie
 def test_step_b2_dedups_by_title_content(session: Session, classifier: Classifier) -> None:
     keeper = _make_signal(
         session,
-        title="Ветераны боевых действий столичного региона получат новую выплату",
+        title="Постановление о новой выплате ветеранам боевых действий столичного региона принято",
         source_url="https://zao.mos.ru/news/1",
         created_at=NOW,
     )
     dupe = _make_signal(
         session,
-        title="Ветераны боевых действий столичного региона получат новую выплату",
+        title="Постановление о новой выплате ветеранам боевых действий столичного региона принято",
         source_url="https://svao.mos.ru/news/2",
         created_at=NOW + dt.timedelta(hours=2),
     )
@@ -139,7 +180,7 @@ def test_step_c_raises_stale_low_priority(session: Session, classifier: Classifi
     # текущий классификатор даёт medium, сигнал сохранён с устаревшим low.
     signal = _make_signal(
         session,
-        title="Евгений Солнцев: в Оренбуржье ввели новую меру поддержки участникам СВО",
+        title="Евгений Солнцев: в Оренбуржье ввели новую меру поддержки участникам СВО, выплата принята",
         source_url="https://rg.ru/2026/08/10/x.html",
         priority=Priority.LOW,
         region=REGION_UNDEFINED,
@@ -201,4 +242,5 @@ def test_finalized_statuses_are_never_touched(session: Session, classifier: Clas
     session.refresh(signal)
 
     assert report.excluded_by_url == []
+    assert report.reviews == []
     assert signal.status == SignalStatus.IN_PROGRESS

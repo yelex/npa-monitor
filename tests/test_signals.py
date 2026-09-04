@@ -9,7 +9,7 @@ from db.models import Signal
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import ClassificationResult
 from parser.models import Publication
-from parser.signals import build_signal
+from parser.signals import build_signal, is_review
 
 
 @pytest.fixture
@@ -65,3 +65,31 @@ def test_build_signal_returns_none_for_irrelevant_publication(session: Session) 
 
     assert signal is None
     assert session.query(Signal).count() == 0
+
+
+def test_is_review_true_only_when_relevant_and_review_event_type() -> None:
+    relevant_review = ClassificationResult(
+        is_relevant=True,
+        categories=(SignalCategory.VETERANS,),
+        event_type=EventType.REVIEW,
+        region=REGION_RF,
+        priority=Priority.MEDIUM,
+    )
+    relevant_with_marker = ClassificationResult(
+        is_relevant=True,
+        categories=(SignalCategory.VETERANS,),
+        event_type=EventType.NEW_DOCUMENT,
+        region=REGION_RF,
+        priority=Priority.HIGH,
+    )
+    irrelevant_review = ClassificationResult(
+        is_relevant=False,
+        categories=(),
+        event_type=EventType.REVIEW,
+        region=REGION_UNDEFINED,
+        priority=Priority.LOW,
+    )
+
+    assert is_review(relevant_review) is True
+    assert is_review(relevant_with_marker) is False
+    assert is_review(irrelevant_review) is False

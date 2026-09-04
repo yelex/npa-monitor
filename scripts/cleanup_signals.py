@@ -1,16 +1,19 @@
 """Одноразовая ретроактивная чистка уже накопленных сигналов на проде, PLAN.md Фаза 9
-п.7, `docs/SPEC_retroactive_signals_cleanup.md`.
+п.7, `docs/SPEC_retroactive_signals_cleanup.md`, п.3 `docs/SPEC_review_filter_discovery.md`.
 
-Применяет ту же логику, что фиксы Фазы 9 п.1/п.2/п.3/п.5 добавили в живой обход
-источников (`parser/orchestrator.py`), к сигналам, уже созданным до этих фиксов.
-Никогда не трогает сигналы вне статусов «Новый»/«Отложен» (раздел 3 спеки) и никогда не
-отклоняет сигналы автоматически по релевантности (шаг D — только отчёт, раздел 5 спеки,
-т.к. без сохранённого `summary` пересчёт релевантности по одному заголовку менее
-надёжен, чем исходная классификация).
+Применяет ту же логику, что фиксы Фазы 9 п.1/п.2/п.3/п.5 и `docs/SPEC_review_
+filter_discovery.md` добавили в живой обход источников (`parser/orchestrator.py`,
+`parser/discovery_search.py`), к сигналам, уже созданным до этих фиксов. Никогда не
+трогает сигналы вне статусов «Новый»/«Отложен» (раздел 3 спеки) и никогда не отклоняет
+сигналы автоматически по общей релевантности (шаг D — только отчёт, раздел 5 спеки, т.к.
+без сохранённого `summary` пересчёт релевантности по одному заголовку менее надёжен, чем
+исходная классификация). Исключение — шаг A2 (обзоры/агрегаторы, REVIEW): применяется
+автоматически, т.к. это узкая, отдельно проверенная категория (`is_review`), а не общая
+пересчитанная релевантность.
 
 Запуск: `python -m scripts.cleanup_signals` (отчёт, без записи) или
-`python -m scripts.cleanup_signals --apply` (шаги A/B/C применяются к БД, шаг D — всегда
-только отчёт). Перед `--apply` на боевой БД — сделать бэкап файла (раздел 7 спеки).
+`python -m scripts.cleanup_signals --apply` (шаги A/A2/B/C применяются к БД, шаг D —
+всегда только отчёт). Перед `--apply` на боевой БД — сделать бэкап файла (раздел 7 спеки).
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_ti
 from parser.filters import is_excluded_path
 from parser.llm import ClassifierLLMClient, get_default_client
 from parser.models import Publication
+from parser.signals import is_review
 
 log = logging.getLogger("cleanup_signals")
 
@@ -63,6 +67,7 @@ class RelevanceFlag:
 @dataclasses.dataclass
 class CleanupReport:
     excluded_by_url: list[RejectedItem] = dataclasses.field(default_factory=list)
+    reviews: list[RejectedItem] = dataclasses.field(default_factory=list)
     duplicates_by_url: list[RejectedItem] = dataclasses.field(default_factory=list)
     duplicates_by_title: list[RejectedItem] = dataclasses.field(default_factory=list)
     priority_changes: list[PriorityChange] = dataclasses.field(default_factory=list)
@@ -72,6 +77,8 @@ class CleanupReport:
         lines = ["=== Ретроактивная чистка сигналов (PLAN.md Фаза 9 п.7) ==="]
         lines.append(f"Шаг A — исключены по URL-паттерну: {len(self.excluded_by_url)}")
         lines += [f"  [{i.signal_id}] {i.title!r} — {i.reason}" for i in self.excluded_by_url]
+        lines.append(f"Шаг A2 — обзоры/агрегаторы без маркера события (REVIEW): {len(self.reviews)}")
+        lines += [f"  [{i.signal_id}] {i.title!r} — {i.reason}" for i in self.reviews]
         lines.append(f"Шаг B1 — дубликаты по каноническому URL: {len(self.duplicates_by_url)}")
         lines += [f"  [{i.signal_id}] {i.title!r} — {i.reason}" for i in self.duplicates_by_url]
         lines.append(f"Шаг B2 — дубликаты по заголовку: {len(self.duplicates_by_title)}")
@@ -113,6 +120,36 @@ def _step_a_url_exclusions(
         if is_excluded_path(signal.source_url):
             reason = "Фаза 9 п.1/п.3: статичная справочная страница, ретроактивная чистка"
             report.excluded_by_url.append(RejectedItem(signal.id, signal.title, reason))
+            if apply:
+                _reject(session, signal, rejection_reason=RejectionReason.NOT_NPA, reason=reason)
+        else:
+            remaining.append(signal)
+    return remaining
+
+
+def _step_a2_review_filter(
+    session: Session, classifier: Classifier, signals: list[Signal], report: CleanupReport, *, apply: bool
+) -> list[Signal]:
+    """docs/SPEC_review_filter_discovery.md, п.3: обзоры/агрегаторы (`is_review`, тот же
+    фильтр, что и в живом обходе — `parser/signals.py`), просочившиеся в БД до фикса
+    (в первую очередь через Yandex-discovery, который не проверял `event_type` вовсе).
+    Реклассификация по заголовку — тот же приём, что и шаг D ниже, но здесь безопасна
+    применять автоматически: `is_review` требует, чтобы публикация была релевантна
+    (ЖС + тематический блок совпали) и НЕ содержала маркер события 5.4 — то есть либо
+    сигнал в принципе не должен был быть создан (тот же риск, что и шаг D), либо это
+    ровно тот обзорный шум, который и есть предмет этой чистки."""
+    remaining = []
+    for signal in signals:
+        pub = Publication(
+            source_key="cleanup_script",
+            title=signal.title or "",
+            url=signal.source_url,
+            published_at=signal.created_at,
+        )
+        trace = classifier.explain(pub)
+        if is_review(trace.result):
+            reason = "docs/SPEC_review_filter_discovery.md: обзор/агрегатор без маркера события, ретроактивная чистка"
+            report.reviews.append(RejectedItem(signal.id, signal.title, reason))
             if apply:
                 _reject(session, signal, rejection_reason=RejectionReason.NOT_NPA, reason=reason)
         else:
@@ -220,6 +257,7 @@ def run_cleanup(
 
     signals = _active_signals(session)
     signals = _step_a_url_exclusions(session, signals, report, apply=apply)
+    signals = _step_a2_review_filter(session, classifier, signals, report, apply=apply)
     signals = _step_b1_url_dedup(session, signals, report, apply=apply)
     signals = _step_b2_title_dedup(session, signals, report, apply=apply, llm_client=llm_client)
     _step_c_priority(classifier, signals, report, apply=apply)
@@ -236,7 +274,7 @@ def main() -> None:
     cli_parser.add_argument(
         "--apply",
         action="store_true",
-        help="применить шаги A/B/C к БД (по умолчанию — только отчёт, БД не меняется)",
+        help="применить шаги A/A2/B/C к БД (по умолчанию — только отчёт, БД не меняется)",
     )
     args = cli_parser.parse_args()
 
@@ -253,7 +291,7 @@ def main() -> None:
 
     print(report.format())
     if not args.apply:
-        print("\n(режим отчёта — БД не изменена; для применения шагов A/B/C передайте --apply)")
+        print("\n(режим отчёта — БД не изменена; для применения шагов A/A2/B/C передайте --apply)")
 
 
 if __name__ == "__main__":

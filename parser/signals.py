@@ -3,10 +3,21 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from db.enums import EventType
 from db.models import Signal
 from db.service import create_signal
 from parser.classifier import ClassificationResult
 from parser.models import Publication
+
+
+def is_review(classification: ClassificationResult) -> bool:
+    """docs/SPEC_no_reviews_no_stale_reminders.md, п.1 / docs/SPEC_review_filter_discovery.md:
+    обзоры/агрегаторы (нет маркера события 5.4, `detect_event_type` вернул REVIEW) не
+    содержат конкретики по отдельной новости — сигнал для них не создаётся. Общая точка
+    для оркестратора (`parser/orchestrator.py`) и Yandex-discovery
+    (`parser/discovery_search.py`), чтобы фильтр не расходился по путям создания сигнала.
+    """
+    return classification.is_relevant and classification.event_type == EventType.REVIEW
 
 
 def build_signal(

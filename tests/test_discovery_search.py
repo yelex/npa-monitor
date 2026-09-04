@@ -188,7 +188,7 @@ def test_run_discovery_search_creates_signal_for_relevant_publication(
     publications = [
         _pub(
             "https://docs.cntd.ru/document/1314770295",
-            "постановление ветеран боевых действий выплата новый",
+            "постановление ветеран боевых действий выплата новый принята",
         )
     ]
     monkeypatch.setattr(
@@ -207,9 +207,72 @@ def test_run_discovery_search_creates_signal_for_relevant_publication(
     )
     session.commit()
 
-    assert result == DiscoverySearchResult(found=1, duplicates=0, irrelevant=0, new_signals=1)
+    assert result == DiscoverySearchResult(found=1, duplicates=0, irrelevant=0, reviews=0, new_signals=1)
     assert session.query(Signal).count() == 1
     assert session.query(Signal).one().source_url == "https://docs.cntd.ru/document/1314770295"
+
+
+def test_run_discovery_search_skips_review_without_event_marker(
+    monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
+) -> None:
+    # docs/SPEC_review_filter_discovery.md: тот же фильтр обзоров, что и в оркестраторе
+    # (tests/test_orchestrator.py::test_process_source_skips_review_without_event_marker),
+    # но на discovery-пути — без него `build_signal` звался напрямую, и сигнал #196
+    # (обзор КонсультантПлюс) прошёл в digest.
+    publications = [
+        _pub(
+            "https://docs.cntd.ru/document/review-1",
+            "обзор мер поддержки ветеранов боевых действий: выплаты и льготы",
+        )
+    ]
+    monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
+
+    result = run_discovery_search(
+        session,
+        classifier,
+        query="выплата",
+        date_from=dt.date(2025, 12, 1),
+        date_to=dt.date(2025, 12, 31),
+        api_key="key",
+        folder_id="folder",
+        domains={"docs.cntd.ru"},
+    )
+    session.commit()
+
+    assert result.new_signals == 0
+    assert result.reviews == 1
+    assert result.irrelevant == 0
+    assert session.query(Signal).count() == 0
+
+
+def test_run_discovery_search_creates_signal_for_review_with_event_marker(
+    monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
+) -> None:
+    # Тот же текст, что и выше, но с маркером события ("принято") — уже не обзор,
+    # сигнал создаётся как обычно.
+    publications = [
+        _pub(
+            "https://docs.cntd.ru/document/event-1",
+            "постановление о мерах поддержки ветеранов боевых действий принято",
+        )
+    ]
+    monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
+
+    result = run_discovery_search(
+        session,
+        classifier,
+        query="выплата",
+        date_from=dt.date(2025, 12, 1),
+        date_to=dt.date(2025, 12, 31),
+        api_key="key",
+        folder_id="folder",
+        domains={"docs.cntd.ru"},
+    )
+    session.commit()
+
+    assert result.new_signals == 1
+    assert result.reviews == 0
+    assert session.query(Signal).count() == 1
 
 
 def test_run_discovery_search_skips_irrelevant_publication(
@@ -266,7 +329,7 @@ def test_run_discovery_search_dedups_against_existing_document_seen(
     monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
 ) -> None:
     publications = [
-        _pub("https://docs.cntd.ru/document/1314770295", "постановление ветеран боевых действий выплата")
+        _pub("https://docs.cntd.ru/document/1314770295", "постановление ветеран боевых действий выплата принята")
     ]
     monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
 
@@ -295,7 +358,7 @@ def test_run_discovery_search_dry_run_does_not_write_to_db(
     monkeypatch: pytest.MonkeyPatch, session: Session, classifier: Classifier
 ) -> None:
     publications = [
-        _pub("https://docs.cntd.ru/document/1314770295", "постановление ветеран боевых действий выплата")
+        _pub("https://docs.cntd.ru/document/1314770295", "постановление ветеран боевых действий выплата принята")
     ]
     monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)
 
@@ -323,7 +386,7 @@ def test_run_discovery_search_paginates_until_short_page(
     """`max_pages` — верхняя граница, но останавливается раньше, если страница пришла
     короче `results_count` (SPEC раздел 4б: пагинация через `query.page`, не бесконечная
     — каждая страница это отдельный платный вызов)."""
-    title = "постановление ветеран боевых действий выплата"
+    title = "постановление ветеран боевых действий выплата принята"
     pages = {
         0: [_pub(f"https://docs.cntd.ru/document/{i}", title) for i in range(2)],
         1: [_pub("https://docs.cntd.ru/document/last", title)],
@@ -386,7 +449,7 @@ def test_run_daily_discovery_creates_signal_with_per_situation_source_key(
         return [
             Publication(
                 source_key=source_key,
-                title="ветеран боевых действий выплата льгота новый",
+                title="ветеран боевых действий выплата льгота новый принята",
                 url="https://docs.cntd.ru/document/1",
                 published_at=None,
             )
@@ -448,7 +511,7 @@ def test_run_daily_discovery_isolates_failure_of_one_situation(
     def fake_search_yandex(query_text, *, source_key, **kw):
         if source_key == "yandex_search:veterans":
             raise YandexSearchUnavailable("сеть недоступна")
-        return [_pub("https://docs.cntd.ru/document/2", "инвалид выплата льгота новый")]
+        return [_pub("https://docs.cntd.ru/document/2", "инвалид выплата льгота новый принята")]
 
     monkeypatch.setattr("parser.discovery_search.search_yandex", fake_search_yandex)
 
@@ -519,12 +582,12 @@ def test_run_discovery_search_dedups_pagination_variants_of_same_document(
         [
             (
                 "https://minjust.consultant.ru/special/documents/document/60711?items=1&page=2",
-                "ПРИКАЗ Минтруда РФ ветеран боевых действий выплата",
+                "ПРИКАЗ Минтруда РФ ветеран боевых действий выплата принята",
                 "текст",
             ),
             (
                 "https://minjust.consultant.ru/special/documents/document/60711?items=1&page=8",
-                "ПРИКАЗ Минтруда РФ ветеран боевых действий выплата",
+                "ПРИКАЗ Минтруда РФ ветеран боевых действий выплата принята",
                 "текст",
             ),
         ]
@@ -592,7 +655,7 @@ def test_run_discovery_search_replaces_snippet_title_with_full_page_title(
     publications = [
         _pub(
             "https://docs.cntd.ru/document/1314770295",
-            "постановление ветеран боевых действий выплата новый...",
+            "постановление ветеран боевых действий выплата новый принята...",
         )
     ]
     monkeypatch.setattr("parser.discovery_search.search_yandex", lambda *a, **kw: publications)

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 
 from config import get_settings
 from db.catalog import all_domains
-from db.enums import EventType, Priority
+from db.enums import Priority
 from db.service import link_document_to_signal, recent_documents_with_titles, register_document_seen
 from parser.classifier import Classifier
 from parser.dedup import TITLE_DEDUP_WINDOW, canonicalize_url, find_duplicate_title
@@ -40,7 +40,7 @@ from parser.filters import NOT_NPA_ACTIVITY_REASON, is_domain_whitelisted, is_ex
 from parser.llm import ClassifierLLMClient, get_default_client
 from parser.llm_priority import apply_refinements, chunk_signal_ids, log_refinement, refine_priorities_batch
 from parser.models import Publication
-from parser.signals import build_signal
+from parser.signals import build_signal, is_review
 from parser.sources import government, kremlin, mintrud, mos_ru, msupport_dszn, other, pravo_gov, sfr
 from parser.state import fetch_window_start, mark_source_failed, mark_source_processed
 
@@ -361,7 +361,7 @@ def _process_publication(
     # docs/SPEC_no_reviews_no_stale_reminders.md, п.1: обзоры/агрегаторы (нет маркера
     # события 5.4, `detect_event_type` вернул REVIEW) не содержат конкретики по
     # отдельной новости — сигнал не создаётся, публикация просто пропускается.
-    if trace.result.is_relevant and trace.result.event_type == EventType.REVIEW:
+    if is_review(trace.result):
         result.reviews += 1
         log.debug("  отфильтровано: обзор (без конкретики)")
         return

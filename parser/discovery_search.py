@@ -81,7 +81,7 @@ from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable, fetch
 from parser.filters import is_domain_whitelisted
 from parser.models import Publication
-from parser.signals import build_signal
+from parser.signals import build_signal, is_review
 from parser.state import fetch_window_start, mark_source_processed
 
 # Не `logging.getLogger(__name__)`: запущенный как `python -m parser.discovery_search`
@@ -270,6 +270,7 @@ class DiscoverySearchResult:
     found: int = 0
     duplicates: int = 0
     irrelevant: int = 0
+    reviews: int = 0  # docs/SPEC_review_filter_discovery.md: обзоры/агрегаторы, сигнал не создаётся
     new_signals: int = 0  # в dry-run — сколько сигналов было бы создано, без записи в БД
 
 
@@ -333,6 +334,15 @@ def run_discovery_search(
             log.debug("  %s", trace.format())
             if not trace.result.is_relevant:
                 result.irrelevant += 1
+                continue
+
+            # docs/SPEC_review_filter_discovery.md: тот же фильтр обзоров/агрегаторов,
+            # что и в оркестраторе (`parser/orchestrator.py::_process_publication`) — до
+            # `_fetch_full_title`, чтобы не тянуть заголовок страницы, которая всё равно
+            # будет отброшена.
+            if is_review(trace.result):
+                result.reviews += 1
+                log.debug("  отфильтровано: обзор (без конкретики)")
                 continue
 
             # Полный заголовок — только для уже отобранных релевантных публикаций
@@ -458,11 +468,12 @@ def run_daily_discovery(
         session.commit()
         results.append(DailyDiscoveryRunResult(source_key=source_key, ok=True, result=search_result))
         log.info(
-            "Yandex Search %s: найдено=%d дублей=%d нерелевантных=%d новых сигналов=%d",
+            "Yandex Search %s: найдено=%d дублей=%d нерелевантных=%d обзоров=%d новых сигналов=%d",
             source_key,
             search_result.found,
             search_result.duplicates,
             search_result.irrelevant,
+            search_result.reviews,
             search_result.new_signals,
         )
 
@@ -536,11 +547,12 @@ def main() -> None:
             session.commit()
 
     log.info(
-        "готово%s: найдено=%d дублей=%d нерелевантных=%d новых сигналов=%d",
+        "готово%s: найдено=%d дублей=%d нерелевантных=%d обзоров=%d новых сигналов=%d",
         " (dry-run, БД не изменена)" if args.dry_run else "",
         result.found,
         result.duplicates,
         result.irrelevant,
+        result.reviews,
         result.new_signals,
     )
 
