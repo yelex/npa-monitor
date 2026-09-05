@@ -1279,6 +1279,8 @@ async def _send_health_alert_if_needed(bot: Bot) -> None:
 async def _digest_loop(bot: Bot) -> None:
     while True:
         await asyncio.sleep(_seconds_until_next(DIGEST_HOUR))
+        if dt.datetime.now().weekday() >= 5:  # сб/вс: парсер (cron 1-5) не ходил, слать нечего
+            continue
         try:
             await _send_health_alert_if_needed(bot)
         except Exception:  # noqa: BLE001

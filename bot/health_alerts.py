@@ -161,10 +161,29 @@ def sources_due_for_alert(
     return due
 
 
+def _zero_signal_window_start(now_local: dt.datetime) -> dt.datetime:
+    """Начало окна проверки второго триггера — момент самого недавнего планового
+    запуска парсера (cron `0 6 * * 1-5`, 06:00 локального времени, см. SPEC_weekend_
+    zero_signal_window.md): в сб/вс и пн-до-прогона окно накрывает пятничный прогон,
+    и успешный пятничный обход не считается деградацией. Если расписание сменится —
+    менять здесь вместе с crontab."""
+    candidate = now_local.replace(hour=6, minute=0, second=0, microsecond=0)
+    # 5=суббота, 6=воскресенье: последний плановый день — пятница (откат на 2 дня);
+    # понедельник до 06:00 — тоже пятница. Остальные дни до 06:00 — предыдущий день.
+    if candidate > now_local:
+        candidate -= dt.timedelta(days=1)
+    while candidate.weekday() >= 5:  # сб/вс не входят в расписание 1-5
+        candidate -= dt.timedelta(days=1)
+    return candidate
+
+
 def check_zero_signal_degradation(session: Session, *, now: dt.datetime | None = None) -> bool:
-    """Второй триггер спеки (раздел «Предполагаемый фикс», п.2): за последние сутки не
-    появилось ни одного нового сигнала И ни один ЖС-значимый источник
-    (`YZS_SIGNIFICANT_SOURCE_PREFIXES`) не обходился успешно за то же окно.
+    """Второй триггер спеки (раздел «Предполагаемый фикс», п.2): со времени последнего
+    планового прогона парсера не появилось ни одного нового сигнала И ни один
+    ЖС-значимый источник (`YZS_SIGNIFICANT_SOURCE_PREFIXES`) не обходился успешно
+    за то же окно. Окно — не фиксированные 24 часа, а от последнего планового запуска
+    (06:00 пн-пт по cron): фиксированные сутки ложно срабатывали в выходные, когда
+    пятничный прогон выпадал из окна (инцидент 05.09, SPEC_weekend_zero_signal_window.md).
 
     Отличие от `check_source_health`: тот ловит деградацию отдельных источников по
     счётчику неудачных попыток; этот — более грубый, но более надёжный сигнал «парсер в
@@ -178,12 +197,17 @@ def check_zero_signal_degradation(session: Session, *, now: dt.datetime | None =
     Отдельная защита от ложного срабатывания на ещё ни разу не запускавшемся парсере
     (`sources_state` целиком пустая — не с чем сравнивать, деградации не бывает без
     предыдущей истории обходов): в этом случае функция молчит."""
-    now = now or dt.datetime.now(dt.timezone.utc)
-    since = now - ATTEMPT_FRESHNESS_WINDOW
-
     has_ever_run = session.scalar(select(SourceState.source_key).limit(1)) is not None
     if not has_ever_run:
         return False
+
+    now = now or dt.datetime.now(dt.timezone.utc)
+    # БД хранит наивные UTC-таймстемпы; окно тоже считаем в UTC. Расписание cron (06:00)
+    # привязано к локальному времени хоста — Europe/Amsterdam (сервер гейтвея),
+    # хост-инфраструктура npa-monitor живёт в том же поясе.
+    now_local = now.astimezone(tz=dt.timezone(dt.timedelta(hours=2)))  # Amsterdam CEST
+    window_start_local = _zero_signal_window_start(now_local)
+    since = window_start_local.astimezone(dt.timezone.utc)
 
     has_recent_signal = session.scalar(select(Signal.id).where(Signal.created_at >= since).limit(1))
     if has_recent_signal is not None:
