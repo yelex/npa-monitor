@@ -24,6 +24,7 @@ import datetime as dt
 import json
 import logging
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -43,6 +44,10 @@ ATTEMPT_FRESHNESS_WINDOW = dt.timedelta(hours=24)
 ALERT_DEDUP_TTL = dt.timedelta(hours=24)
 
 DEFAULT_STATE_PATH = Path("data/health_alerts_state.json")
+
+# Расписание cron парсера (см. _zero_signal_window_start) привязано к локальному
+# времени хоста; digest-loop бота считает его тем же поясом Europe/Amsterdam.
+PARSER_TZ = ZoneInfo("Europe/Amsterdam")
 
 # Спека, раздел «Предполагаемый фикс», второй пункт: источники, без которых парсер в
 # принципе не может найти ЖС-значимую публикацию (federal-листинги + Yandex Search
@@ -205,7 +210,7 @@ def check_zero_signal_degradation(session: Session, *, now: dt.datetime | None =
     # БД хранит наивные UTC-таймстемпы; окно тоже считаем в UTC. Расписание cron (06:00)
     # привязано к локальному времени хоста — Europe/Amsterdam (сервер гейтвея),
     # хост-инфраструктура npa-monitor живёт в том же поясе.
-    now_local = now.astimezone(tz=dt.timezone(dt.timedelta(hours=2)))  # Amsterdam CEST
+    now_local = now.astimezone(PARSER_TZ)
     window_start_local = _zero_signal_window_start(now_local)
     since = window_start_local.astimezone(dt.timezone.utc)
 
@@ -226,8 +231,8 @@ def format_zero_signal_alert() -> str:
     одном источнике, а в отсутствии успешных обходов вообще), но подсказка та же."""
     names = ", ".join(prefix.rstrip(":") for prefix in YZS_SIGNIFICANT_SOURCE_PREFIXES)
     return (
-        "⚠️ За последние сутки не найдено ни одного нового сигнала, и ни один из "
-        f"ключевых источников ({names}) не обходился успешно за это же время.\n"
+        "⚠️ С последнего планового прогона парсера не найдено ни одного нового "
+        f"сигнала, и ни один из ключевых источников ({names}) не обходился успешно за это же время.\n"
         "Проверьте прокси/ключи (RU_PROXY_URL, YANDEX_SEARCH_*)."
     )
 

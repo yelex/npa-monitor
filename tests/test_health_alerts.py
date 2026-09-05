@@ -297,3 +297,59 @@ def test_zero_signal_alert_dedup_survives_per_source_cleanup(tmp_path) -> None:
     # тот же самый прогон полчаса спустя — второй триггер всё ещё должен молчать по TTL
     still_deduped = zero_signal_alert_due(state_path=state_path, now=NOW + dt.timedelta(minutes=30))
     assert still_deduped is False
+
+
+# --- SPEC_weekend_zero_signal_window.md: окно от последнего планового прогона (cron 1-5) ---
+
+def test_zero_signal_window_saturday_covers_friday_run(session: Session) -> None:
+    """Инцидент 05.09: в субботу 08:00 local пятничный прогон (06:00 UTC) уже был,
+    но выпадал из фиксированных 24ч — окно теперь должно накрывать пятницу."""
+    saturday = dt.datetime(2026, 9, 5, 6, 0, tzinfo=dt.timezone.utc)  # сб 08:00 Amsterdam
+    friday_run = dt.datetime(2026, 9, 4, 4, 0, tzinfo=dt.timezone.utc)  # пт 06:00 local
+    update_source_state(session, source_key="kremlin.ru/acts/news", success_at=friday_run)
+    session.commit()
+
+    assert check_zero_signal_degradation(session, now=saturday) is False
+
+
+def test_zero_signal_window_sunday_covers_friday_run(session: Session) -> None:
+    sunday = dt.datetime(2026, 9, 6, 6, 0, tzinfo=dt.timezone.utc)  # вс 08:00 local
+    friday_run = dt.datetime(2026, 9, 4, 4, 0, tzinfo=dt.timezone.utc)
+    update_source_state(session, source_key="publication.pravo.gov.ru", success_at=friday_run)
+    session.commit()
+
+    assert check_zero_signal_degradation(session, now=sunday) is False
+
+
+def test_zero_signal_window_monday_before_run_covers_friday(session: Session) -> None:
+    """Понедельник 08:00 local — до прогона (06:00 уже был? нет: 06:00 пн предшествует
+    08:00, значит понедельник 06:00 внутри окна; проверяем, что пятничный успех тоже не
+    нужен, если пн-прогон был успешен."""
+    monday = dt.datetime(2026, 9, 7, 6, 0, tzinfo=dt.timezone.utc)  # пн 08:00 local
+    monday_run = dt.datetime(2026, 9, 7, 4, 0, tzinfo=dt.timezone.utc)  # пн 06:00 local
+    update_source_state(session, source_key="government.ru/docs", success_at=monday_run)
+    session.commit()
+
+    assert check_zero_signal_degradation(session, now=monday) is False
+
+
+def test_zero_signal_window_weekend_real_degradation_still_triggers(session: Session) -> None:
+    """Настоящая деградация: пятничный прогон был, но все значимые источники упали."""
+    saturday = dt.datetime(2026, 9, 5, 6, 0, tzinfo=dt.timezone.utc)
+    friday_fail = dt.datetime(2026, 9, 4, 4, 0, tzinfo=dt.timezone.utc)
+    record_source_failure(session, source_key="kremlin.ru/acts/news", attempt_at=friday_fail)
+    record_source_failure(session, source_key="publication.pravo.gov.ru", attempt_at=friday_fail)
+    session.commit()
+
+    assert check_zero_signal_degradation(session, now=saturday) is True
+
+
+def test_zero_signal_window_winter_offset(session: Session) -> None:
+    """Зимний CET (UTC+1): январская суббота 08:00 local = 07:00 UTC, пятничный прогон
+    05:00 UTC (06:00 local) должен попадать в окно и без хардкода +2."""
+    saturday = dt.datetime(2027, 1, 9, 7, 0, tzinfo=dt.timezone.utc)  # сб 08:00 CET
+    friday_run = dt.datetime(2027, 1, 8, 5, 0, tzinfo=dt.timezone.utc)  # пт 06:00 CET
+    update_source_state(session, source_key="kremlin.ru/acts/news", success_at=friday_run)
+    session.commit()
+
+    assert check_zero_signal_degradation(session, now=saturday) is False
