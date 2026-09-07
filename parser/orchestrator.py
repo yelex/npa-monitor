@@ -86,6 +86,12 @@ class SourceRunResult:
     excluded: int = 0
     reviews: int = 0
     news_activity: int = 0
+    # docs/SPEC_hybrid_classifier.md п.7 (near-miss → trace-лог): сколько публикаций
+    # дошло до Stage B-гейта и сколько из них он принял. Прод раньше это не логировал
+    # вовсе (trace только на DEBUG), из-за чего шаг (a) итерации LLM-ассиста (замер
+    # объёма near-miss) был невозможен — считаем прямо в рантайме раннера.
+    stage_b_seen: int = 0
+    stage_b_accepted: int = 0
     error: str | None = None
     # PLAN.md Фаза 11 / docs/SPEC_llm_priority.md: id сигналов этого источника с
     # regex-приоритетом MEDIUM/LOW, созданных за этот прогон — материал для
@@ -360,6 +366,18 @@ def _process_publication(
 
     trace = classifier.explain(pub)
     log.debug("  %s", trace.format())
+    if trace.hybrid is not None:
+        result.stage_b_seen += 1
+        if trace.hybrid.accepted:
+            result.stage_b_accepted += 1
+        log.info(
+            "Stage B: %s cat=%s cos=%.3f bm25=%.3f rrf_gap=%.3f",
+            "принят" if trace.hybrid.accepted else "near-miss",
+            trace.hybrid.category.value,
+            trace.hybrid.cos_score,
+            trace.hybrid.bm25_score,
+            trace.hybrid.rrf_gap,
+        )
 
     # docs/SPEC_no_reviews_no_stale_reminders.md, п.1: обзоры/агрегаторы (нет маркера
     # события 5.4, `detect_event_type` вернул REVIEW) не содержат конкретики по
@@ -459,7 +477,7 @@ def run_all(
         results.append(result)
         log.info(
             "источник %s: ok=%s новых=%d дублей=%d нерелевантных=%d исключено=%d обзоров=%d "
-            "новостного_шума=%d",
+            "новостного_шума=%d stage_b=%d (принято=%d)",
             result.source_key,
             result.ok,
             result.new_signals,
@@ -468,6 +486,8 @@ def run_all(
             result.excluded,
             result.reviews,
             result.news_activity,
+            result.stage_b_seen,
+            result.stage_b_accepted,
         )
 
     medium_low_ids = [sid for result in results for sid in result.medium_low_signal_ids]

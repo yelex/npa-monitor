@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     # Telegram
     telegram_bot_token: str = ""
     allowed_telegram_user_ids: str = ""  # через запятую
+    # Админ (обычно = первый allowed id): ему бот шлёт уведомления о действиях
+    # экспертов — взяли/отклонили/передали сигнал (см. `_notify_admin_of_transition`).
+    admin_telegram_user_id: int = 0  # 0 = уведомления выключены
 
     # БД
     database_path: str = "data/npa_monitor.db"

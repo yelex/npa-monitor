@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -2169,7 +2169,8 @@ def test_router_maps_each_command_name_to_matching_handler() -> None:
                     seen.add(command)
 
     assert seen == {
-        "start", "today", "pending", "history", "sent", "stats", "reopen", "complete", "digest",
+        "start", "today", "pending", "history", "sent", "stats", "audit", "reopen", "complete",
+        "digest",
     }
 
 
@@ -2320,5 +2321,76 @@ async def test_send_health_alert_silent_on_zero_signals_when_significant_source_
     bot.send_message = AsyncMock()
 
     await bot_main._send_health_alert_if_needed(bot)
+
+    bot.send_message.assert_not_awaited()
+
+
+async def test_cmd_audit_lists_recent_transitions_with_actor_and_time() -> None:
+    """/audit показывает журнал status_history: кто/когда менял статус."""
+    sig_id = _make_signal(title="Постановление о мерах поддержки")
+    factory = bot_main.get_session_factory()
+    with factory() as db:
+        s = db.get(bot_main.Signal, sig_id)
+        transition_status(db, s, SignalStatus.IN_PROGRESS, changed_by=739016616)
+        transition_status(db, s, SignalStatus.REJECTED, changed_by=739016616,
+                          rejection_reason=bot_main.RejectionReason.NOT_TARGET_CATEGORY)
+        db.commit()
+
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = None
+
+    await bot_main.cmd_audit(message, command)
+
+    assert message.answer.await_count >= 1
+    text = message.answer.await_args_list[0].args[0]
+    assert "739016616" in text
+    assert "Отклонён" in text
+    assert "#%d" % sig_id in text
+    # свежая запись сверху: первая строка содержит переход в «Отклонён»
+    first_entry = text.splitlines()[1]
+    assert "Отклонён" in first_entry
+
+
+async def test_cmd_audit_empty_db_reports_empty() -> None:
+    message = MagicMock()
+    message.from_user.id = 111
+    message.answer = AsyncMock()
+    command = MagicMock()
+    command.args = None
+
+    await bot_main.cmd_audit(message, command)
+
+    message.answer.assert_awaited_once()
+    assert "пуста" in message.answer.await_args.args[0]
+
+
+async def test_notify_admin_sends_message_for_other_actor() -> None:
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    import config as config_module
+
+    settings_stub = config_module.Settings(admin_telegram_user_id=111)
+    with patch.object(config_module, "get_settings", lambda: settings_stub), \
+         patch.object(bot_main, "get_settings", lambda: settings_stub):
+        await bot_main._notify_admin_of_transition(
+            bot, actor_id=739016616, sig_id=42,
+            text="❌ Сигнал 42 отклонён пользователем 739016616",
+        )
+
+    bot.send_message.assert_awaited_once()
+
+
+async def test_notify_admin_skips_own_actions_and_disabled() -> None:
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+
+    # админ не получает уведомлений о собственных действиях
+    await bot_main._notify_admin_of_transition(bot, actor_id=111, sig_id=1, text="self")
+    # и вообще ничего, если id админа не задан (0 = выключено)
+    await bot_main._notify_admin_of_transition(bot, actor_id=739016616, sig_id=1, text="off")
 
     bot.send_message.assert_not_awaited()

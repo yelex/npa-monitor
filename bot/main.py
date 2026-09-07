@@ -141,6 +141,22 @@ def is_allowed(user_id: int) -> bool:
     return user_id in get_settings().allowed_user_ids
 
 
+async def _notify_admin_of_transition(
+    bot: Bot, actor_id: int, sig_id: int, text: str
+) -> None:
+    """Уведомляет админа (ADMIN_TELEGRAM_USER_ID) о действии эксперта со сигналом —
+    взял в работу / отклонил / передал агенту. Свои собственные действия админу
+    не пересылаются. Ошибка отправки не должна ломать основной флоу эксперта —
+    логируем и продолжаем."""
+    admin_id = get_settings().admin_telegram_user_id
+    if not admin_id or admin_id == actor_id:
+        return
+    try:
+        await bot.send_message(admin_id, text, disable_web_page_preview=True)
+    except Exception:  # noqa: BLE001
+        log.exception("не удалось уведомить админа о действии с сигналом %s", sig_id)
+
+
 # --- Rendering ---------------------------------------------------------------
 
 
@@ -413,6 +429,7 @@ START_TEXT = (
     "/sent — последние 15 переданных агенту, с деталями подтверждения (ЖС, регион, "
     "ссылка на НПА, кто и когда передал)\n"
     "/stats — статистика за 7 дней\n"
+    "/audit N — журнал смен статусов: кто/когда/зачем (последние N, по умолчанию 20)\n"
     "/digest — сводка новых и отложенных сигналов по запросу\n"
     "/reopen ID — вернуть отклонённый сигнал в «Новый»\n"
     "/complete ID — отметить сигнал завершённым после проверки результата агента"
@@ -530,7 +547,6 @@ async def cmd_sent(message: Message) -> None:
 async def cmd_stats(message: Message) -> None:
     if not is_allowed(message.from_user.id):
         return
-    # tz-aware (UTC) — db.types.UTCDateTime требует aware datetime на входе, см. Signal.*
     week_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=7)
     with get_session_factory()() as db:
         qs = db.query(Signal).filter(Signal.created_at >= week_ago).all()
@@ -545,6 +561,43 @@ async def cmd_stats(message: Message) -> None:
         f"• {k}: {v}" for k, v in sorted(by_status.items(), key=lambda kv: -kv[1])
     )
     await message.answer(text)
+
+
+@router.message(Command("audit"))
+async def cmd_audit(message: Message, command: CommandObject) -> None:
+    """Журнал переходов статусов (status_history): кто/когда/зачем менял статус
+    сигналов — ответ на «когда произведено отклонение и кем». Формат: /audit [N],
+    N = сколько последних записей показать (по умолчанию 20, максимум 50)."""
+    if not is_allowed(message.from_user.id):
+        return
+    limit = 20
+    if command.args and command.args.strip().isdigit():
+        limit = max(1, min(int(command.args.strip()), 50))
+    with get_session_factory()() as db:
+        rows = (
+            db.query(StatusHistory)
+            .options(selectinload(StatusHistory.signal))
+            .order_by(StatusHistory.changed_at.desc())
+            .limit(limit)
+            .all()
+        )
+    if not rows:
+        await message.answer("История переходов пуста.")
+        return
+    lines = [f"🗒 Аудит статусов (последние {len(rows)}):"]
+    for h in rows:
+        who = h.changed_by or "—"
+        frm = STATUS_LABELS.get(h.from_status, str(h.from_status)) if h.from_status else "—"
+        to = STATUS_LABELS.get(h.to_status, h.to_status)
+        line = f"• {h.changed_at:%d.%m.%Y %H:%M} #{h.signal_id} · {who}: {frm} → {to}"
+        title = h.signal.title if h.signal else None
+        if title:
+            title = title if len(title) <= 40 else title[:39] + "…"
+            line += f" ({html.escape(title, quote=False)})"
+        lines.append(line)
+    # Telegram ограничивает сообщение 4096 символами — шлём частями
+    for i in range(0, len(lines), 30):
+        await message.answer("\n".join(lines[i : i + 30]))
 
 
 @router.message(Command("reopen"))
@@ -708,6 +761,11 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
                 return
             db.commit()
             log.info("сигнал %s -> В работе (user=%s)", sig_id, cb.from_user.id)
+            await _notify_admin_of_transition(
+                cb.bot, cb.from_user.id, sig_id,
+                f"👷 Сигнал {sig_id} взят в работу пользователем {cb.from_user.id}: "
+                f"{html.escape((s.title or '')[:60], quote=False)}",
+            )
             await state.set_state(NpaFlow.ask_npa_link)
             await state.update_data(sig_id=sig_id)
             await cb.message.answer(  # type: ignore[union-attr]
@@ -763,6 +821,11 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
                 return
             db.commit()
             log.info("сигнал %s -> Отклонён: %s (user=%s)", sig_id, reason.value, cb.from_user.id)
+            await _notify_admin_of_transition(
+                cb.bot, cb.from_user.id, sig_id,
+                f"❌ Сигнал {sig_id} отклонён пользователем {cb.from_user.id} "
+                f"({REJECT_REASONS[code]}): {html.escape((s.title or '')[:60], quote=False)}",
+            )
     await state.clear()
     await cb.message.edit_text(  # type: ignore[union-attr]
         f"❌ Сигнал {sig_id} отклонён: {REJECT_REASONS[code]}"
@@ -995,6 +1058,12 @@ async def _finish_npa_flow(
 
         db.commit()
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
+        await _notify_admin_of_transition(
+            target.bot, changed_by, sig_id,
+            f"📤 Сигнал {sig_id} передан агенту пользователем {changed_by}: "
+            f"{html.escape((s.title or '')[:60], quote=False)}\n"
+            f"Ссылка: {html.escape(s.npa_link or '—', quote=False)}",
+        )
 
     if autocheck_skipped:
         domain = domain_of(npa_link) if npa_link else ""
