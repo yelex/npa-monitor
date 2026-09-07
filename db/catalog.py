@@ -129,10 +129,21 @@ def load_hybrid_anchors(path: Path | None = None) -> tuple[HybridAnchorSet, ...]
                 f"hybrid_anchors.yaml: id={item['id']!r} не соответствует "
                 f"db.enums.SignalCategory — добавь значение в enum или исправь id"
             ) from exc
-        anchors = tuple(
-            HybridAnchor(text=a) if isinstance(a, str) else HybridAnchor(text=a["text"], bm25_anchor=a.get("bm25_anchor"))
-            for a in item["anchors"]
-        )
+        parsed_anchors: list[HybridAnchor] = []
+        for a in item["anchors"]:
+            if isinstance(a, str):
+                parsed_anchors.append(HybridAnchor(text=a))
+            else:
+                unknown_keys = set(a) - {"text", "bm25_anchor"}
+                if unknown_keys or "text" not in a:
+                    raise CatalogError(
+                        f"hybrid_anchors.yaml: id={item['id']!r}, якорь {a!r}: ожидается строка "
+                        f"или словарь с ключами text/bm25_anchor (неизвестные/отсутствующие: "
+                        f"{sorted(unknown_keys | ({'text'} - set(a)))}) — опечатка в ключе иначе \
+                        молча отключает отличительный якорь"
+                    )
+                parsed_anchors.append(HybridAnchor(text=a["text"], bm25_anchor=a.get("bm25_anchor")))
+        anchors = tuple(parsed_anchors)
         result.append(HybridAnchorSet(category=category, anchors=anchors))
     return tuple(result)
 
