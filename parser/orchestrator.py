@@ -100,7 +100,10 @@ def build_source_specs(*, ru_proxy_url: str | None = None) -> list[SourceSpec]:
         SourceSpec(sfr.SOURCE_KEY, sfr.fetch_news),
         SourceSpec(mintrud.SOURCE_KEY, mintrud.fetch_docs),
         SourceSpec(mos_ru.SOURCE_KEY, mos_ru.fetch_documents),
-        SourceSpec(msupport_dszn.SOURCE_KEY, msupport_dszn.fetch_news),
+        SourceSpec(
+            msupport_dszn.SOURCE_KEY,
+            lambda page=1: msupport_dszn.fetch_news(page=page, ru_proxy_url=ru_proxy_url),
+        ),
         SourceSpec(
             pravo_gov.SOURCE_KEY,
             lambda page=1, period="day", date=None: pravo_gov.fetch_documents(

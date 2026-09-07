@@ -45,7 +45,9 @@ def _parse_news_page(html: str) -> list[Publication]:
     return publications
 
 
-def fetch_news(*, page: int = 1) -> list[Publication]:
+def fetch_news(*, page: int = 1, ru_proxy_url: str | None = None) -> list[Publication]:
+    # 2026-09-07: msupport.dszn.ru начал блокировать не-РФ IP (VPS Frankfurt —
+    # ConnectTimeout direct, через RU-прокси 200 за ~0.4с) — переключён с direct на ru_proxy.
     url = NEWS_URL if page == 1 else f"{NEWS_URL}/page-{page}"
-    result = fetch(url, access="direct")
+    result = fetch(url, access="ru_proxy", ru_proxy_url=ru_proxy_url)
     return _parse_news_page(result.text)

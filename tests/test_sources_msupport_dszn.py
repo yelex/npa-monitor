@@ -39,7 +39,7 @@ def test_fetch_news_parses_real_markup_fragment(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client_cls(transport=httpx.MockTransport(handler)))
 
-    publications = fetch_news()
+    publications = fetch_news(ru_proxy_url="http://proxy.test:8888")
 
     assert seen_urls == [NEWS_URL]
     assert len(publications) == 2
@@ -61,6 +61,6 @@ def test_fetch_news_page_2_uses_page_path(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client_cls(transport=httpx.MockTransport(handler)))
 
-    fetch_news(page=2)
+    fetch_news(page=2, ru_proxy_url="http://proxy.test:8888")
 
     assert seen_urls == [f"{NEWS_URL}/page-2"]
