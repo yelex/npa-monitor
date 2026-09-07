@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 
 from config import Settings
 from db.catalog import (
@@ -49,11 +50,9 @@ class Example:
 
 
 # --- Выборка 2 (held-out, спека раздел «Калибровка и приёмка») ---
-# ЗАГЛУШКА: спека требует 20-30 РЕАЛЬНЫХ заголовков pravo.gov.ru, которые Stage A не
-# находит (искать по канцеляризмам «в связи с прохождением»/«в связи с проведением»/
-# «отдельным категориям граждан» на pravo.gov/Яндекс) — не собрано, задача отдельная.
-# Ниже — тот же класс фикстур, что tests/test_hybrid_classifier.py::KAMCHATKA_STYLE_TITLE,
-# только чтобы скрипт был исполним без держателя реальных данных.
+# РЕАЛЬНЫЕ данные: курируются из /tmp/heldout_full.json (сборщик scripts/collect_heldout.py,
+# 60 дней pravo.gov.ru) и складываются в data/heldout_samples.json. Ниже — фикстуры-фолбэк
+# на случай отсутствия файла (тот же класс, что tests/test_hybrid_classifier.py).
 SAMPLE_2_HELD_OUT: tuple[Example, ...] = (
     Example(
         "Постановление Правительства Камчатского края № 412-П о дополнительных выплатах "
@@ -82,8 +81,8 @@ SAMPLE_2_HELD_OUT: tuple[Example, ...] = (
 )
 
 # --- Выборка 3 (контроль, спека раздел «Калибровка и приёмка») ---
-# ЗАГЛУШКА: спека требует 15-20 РЕАЛЬНЫХ нерелевантных заголовков; см. комментарий к
-# SAMPLE_2_HELD_OUT. Реальный ложный кейс ("пятилетка Китая") — AGENTS.md раздел 16 п.15.
+# РЕАЛЬНЫЕ данные: data/heldout_samples.json (не-тематические «Solution/Решение по тарифам»
+# и проконтролированные нерелевантные из missed). Ниже — фикстуры-фолбэк.
 SAMPLE_3_CONTROL: tuple[Example, ...] = (
     Example("Постановление о пятилетнем плане развития рыболовства Китая", "rg.ru", False),
     Example(
@@ -156,6 +155,13 @@ class Metrics:
         return self.tp / denom if denom else None
 
     @property
+    def specificity(self) -> float | None:
+        """tn/(tn+fp): правильная метрика для all-negative выборки 3 (консультация
+        claude 02.09: precision для неё математически n/a|0.00, вводит в заблуждение)."""
+        denom = self.tn + self.fp
+        return self.tn / denom if denom else None
+
+    @property
     def recall(self) -> float | None:
         denom = self.tp + self.fn
         return self.tp / denom if denom else None
@@ -194,15 +200,21 @@ def _evaluate(
     return metrics
 
 
-def _print_metrics(name: str, metrics: Metrics, *, target: str) -> None:
+def _print_metrics(name: str, metrics: Metrics, *, target: str, all_negative: bool = False) -> None:
     print(f"{name} (n={metrics.tp + metrics.fp + metrics.tn + metrics.fn}):")
     print(f"  tp={metrics.tp} fp={metrics.fp} tn={metrics.tn} fn={metrics.fn}")
     precision = metrics.precision
     recall = metrics.recall
+    specificity = metrics.specificity
     no_predictions = "  precision=n/a (нет положительных прогнозов)"
     no_positives = "  recall=n/a (нет ожидаемых положительных)"
+    no_negatives = "  specificity=n/a (нет ожидаемых негативов)"
     print(f"  precision={precision:.2f}" if precision is not None else no_predictions)
     print(f"  recall={recall:.2f}" if recall is not None else no_positives)
+    # all-negative выборка (выборка 3): решающая метрика — специфичность,
+    # precision для неё по построению n/a|0.00 (консультация claude 02.09)
+    if all_negative:
+        print(f"  specificity={specificity:.2f}" if specificity is not None else no_negatives)
     print(f"  цель спеки: {target}")
     print()
 
@@ -218,7 +230,15 @@ def _load_regression_sample(db_path: str) -> tuple[Example, ...]:
     factory = make_session_factory(engine)
     examples: list[Example] = []
     with session_scope(factory) as session:
-        for signal in session.query(Signal).all():
+        # "сырые" значения rejection_reason вне enum (массовая чистка 28.08:
+        # cleanup_20260828, cleanup_20260828_aggregator) ломают SQLAlchemy-десериализацию
+        # при загрузке строки — исключаем на уровне SQL, а не try/except по строкам
+        known_reasons = [r.value for r in RejectionReason] + [None]
+        query = session.query(Signal).filter(
+            Signal.rejection_reason.in_(known_reasons)
+            | Signal.rejection_reason.is_(None)
+        )
+        for signal in query.all():
             if signal.rejection_reason == RejectionReason.DUPLICATE:
                 continue
             if signal.rejection_reason in (RejectionReason.NOT_TARGET_CATEGORY, RejectionReason.NOT_NPA):
@@ -257,11 +277,31 @@ def main() -> None:
         help=f"минимальный зазор RRF (по умолчанию {DEFAULT_RRF_GAP})",
     )
     parser.add_argument(
+        "--samples",
+        default="data/heldout_samples.json",
+        help="реальные выборки 2/3 (JSON); отсутствует — фикстуры-фолбэк",
+    )
+    parser.add_argument(
         "--db", default=None, help="путь к БД для выборки 1 (не-регрессия); по умолчанию — без выборки 1"
     )
     args = parser.parse_args()
 
-    print(f"Пороги: T_cos={args.t_cos} T_bm25={args.t_bm25} RRF-зазор={args.rrf_gap}\n")
+    sample_2, sample_3 = SAMPLE_2_HELD_OUT, SAMPLE_3_CONTROL
+    try:
+        with open(args.samples, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        sample_2 = tuple(
+            Example(e["title"], e["source_key"], e["expect_relevant"]) for e in raw["sample_2_held_out"]
+        )
+        sample_3 = tuple(
+            Example(e["title"], e["source_key"], e["expect_relevant"]) for e in raw["sample_3_control"]
+        )
+        src = f"реальные данные ({args.samples})"
+    except (OSError, KeyError, ValueError):
+        src = "фикстуры-фолбэк (файл реальных выборок не найден/битый)"
+
+    print(f"Пороги: T_cos={args.t_cos} T_bm25={args.t_bm25} RRF-зазор={args.rrf_gap}")
+    print(f"Выборки 2/3: {src}\n")
 
     life_situations = load_life_situations()
     keywords = load_classification_keywords()
@@ -285,14 +325,15 @@ def main() -> None:
         print("Выборка 1 (не-регрессия) пропущена — передай --db для прогона против БД\n")
 
     _print_metrics(
-        "Выборка 2 (held-out, ЗАГЛУШКА — см. докстринг модуля)",
-        _evaluate(SAMPLE_2_HELD_OUT, **eval_kwargs),
+        "Выборка 2 (held-out, Stage A потерял)",
+        _evaluate(sample_2, **eval_kwargs),
         target="recall >= 0.60",
     )
     _print_metrics(
-        "Выборка 3 (контроль нерелевантных, ЗАГЛУШКА — см. докстринг модуля)",
-        _evaluate(SAMPLE_3_CONTROL, **eval_kwargs),
-        target="precision >= 0.85",
+        "Выборка 3 (контроль нерелевантных)",
+        _evaluate(sample_3, **eval_kwargs),
+        target="specificity >= 0.85 (tn/(tn+fp); для all-negative выборки precision по построению n/a|0.00)",
+        all_negative=True,
     )
 
 

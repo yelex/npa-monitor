@@ -684,13 +684,18 @@ async def test_on_npa_link_accepts_reachable_whitelisted_link(monkeypatch) -> No
 async def test_on_npa_link_accepts_unsupported_domain_on_trust_without_network_call(
     monkeypatch,
 ) -> None:
-    """docs/SPEC_bot_npa_link_check.md: docs.cntd.ru размечен access=unsupported (сетевой
+    """docs/SPEC_bot_npa_link_check.md: домен, размеченный access=unsupported (сетевой
     доступ невозможен даже через прокси) — бот должен принимать такую ссылку на доверии,
     не пытаясь её проверить (иначе — 100%-й false negative, см. спеку).
+
+    После SPEC_cntd_ru_proxy в data/sources.yaml не осталось ни одного
+    unsupported-домена, поэтому домен подменяется monkeypatch'ем — тест проверяет
+    поведение бота, а не актуальный состав справочника.
     """
     sig_id = _make_in_progress_signal()
     fetch_mock = MagicMock(side_effect=AssertionError("fetch не должен вызываться для unsupported"))
     monkeypatch.setattr(bot_main, "fetch", fetch_mock)
+    monkeypatch.setattr(bot_main, "access_for_domain", lambda domain: "unsupported")
     sent = MagicMock()
     monkeypatch.setattr(bot_main._autoupdate_client, "send", sent)
     state = FakeState({"sig_id": sig_id})

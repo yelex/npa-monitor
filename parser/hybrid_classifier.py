@@ -41,13 +41,14 @@ Fallback: эмбеддер недоступен (нет `onnxruntime`/`tokenizer
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
-from db.catalog import load_hybrid_anchors
+from db.catalog import HybridAnchor, load_classification_keywords, load_hybrid_anchors
 from db.enums import SignalCategory
 from parser.ru_stem import stem_tokens
 
@@ -69,9 +70,56 @@ DEFAULT_RRF_GAP = 0.0003
 # дают BM25-скор, непропорциональный смысловой значимости совпадения.
 _MIN_BM25_TOKEN_LEN = 3
 
+# Канцелярские слова-связки («отдельным категориям граждан», «лицо» и т.п.) — не
+# относятся ни к одной ЖС, есть почти в любом региональном НПА о соцподдержке
+# (и в true-, и в false-примерах data/heldout_samples.json одинаково). В отличие от
+# вокабуляра тематического блока (см. `_topic_block_stop_stems` ниже) их нет ни в
+# каком справочнике — минимальный ручной список, не входит в него сама тема ЖС.
+# «служ» — отдельная причина: корень «служба»/«служебный» многозначен («военная
+# служба» ветеранов/СВО и «ветеринарная служба»/«государственная служба» и т.п. —
+# найдено на честной выборке 3, data/heldout_samples.json: якорь «в связи с
+# прохождением военной службы...» давал bm25-FP на «специалистов ветеринарных
+# служб», не относящихся ни к одной ЖС) — тот же класс риска, что и «лицо»/
+# «категория», не специфичен для конкретной ЖС сам по себе.
+_LEGAL_FILLER_STOP_STEMS = frozenset("гражд граждан гражда отдельн категори категор лиц служ".split())
+
+
+@functools.lru_cache(maxsize=1)
+def _topic_block_stop_stems() -> frozenset[str]:
+    """Стемы тематического блока (`data/keywords.yaml::topic_block` — «мера
+    поддержки», «выплата», «льгота»…). Stage B запускается только когда topic_block
+    уже совпал (`parser/classifier.py`), поэтому эти слова гарантированно есть почти
+    в каждом заголовке-кандидате и никогда не отличают одну ЖС от другой — раньше
+    их держали вручную в `_BM25_STOP_STEMS` (до `git log`, до этого фикса), теперь
+    выводим из того же справочника, что и Stage A, чтобы список не расходился с
+    ним при правке `data/keywords.yaml`."""
+    return frozenset(
+        stem
+        for phrase in load_classification_keywords().topic_block
+        for stem in stem_tokens(phrase)
+        if len(stem) >= _MIN_BM25_TOKEN_LEN
+    )
+
+
+def _bm25_stop_stems() -> frozenset[str]:
+    return _LEGAL_FILLER_STOP_STEMS | _topic_block_stop_stems()
+
 
 def _bm25_tokens(text: str) -> list[str]:
-    return [t for t in stem_tokens(text) if len(t) >= _MIN_BM25_TOKEN_LEN]
+    """Токенизация запроса для BM25 — те же стоп-стемы, что и автообрезка якорей без
+    явного `bm25_anchor` (`_anchor_bm25_tokens`), иначе словарь корпуса и запроса
+    расходятся и совпадения по общим словам просачиваются с одной стороны."""
+    stop = _bm25_stop_stems()
+    return [t for t in stem_tokens(text) if len(t) >= _MIN_BM25_TOKEN_LEN and t not in stop]
+
+
+def _anchor_bm25_tokens(anchor: HybridAnchor) -> list[str]:
+    """BM25-представление одного якоря: явный `bm25_anchor` — только фильтр по длине
+    (курировано вручную, уже отличительное); иначе — тот же путь, что и запрос
+    (`_bm25_tokens`), общие токены обрезаются автоматически."""
+    if anchor.bm25_anchor:
+        return [t for t in stem_tokens(anchor.bm25_anchor) if len(t) >= _MIN_BM25_TOKEN_LEN]
+    return _bm25_tokens(anchor.text)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,10 +240,12 @@ def _load_context(model_dir: Path) -> _StageBContext | None:
     categories = tuple(a.category for a in anchor_sets)
     anchor_texts: list[str] = []
     anchor_categories: list[SignalCategory] = []
+    bm25_docs: list[list[str]] = []
     for anchor_set in anchor_sets:
-        for phrase in anchor_set.anchors:
-            anchor_texts.append(phrase)
+        for anchor in anchor_set.anchors:
+            anchor_texts.append(anchor.text)
             anchor_categories.append(anchor_set.category)
+            bm25_docs.append(_anchor_bm25_tokens(anchor))
 
     try:
         anchor_vecs = embedder.encode(anchor_texts)
@@ -203,7 +253,7 @@ def _load_context(model_dir: Path) -> _StageBContext | None:
         _warn_once(f"не удалось векторизовать data/hybrid_anchors.yaml: {exc!r}")
         return None
 
-    bm25 = BM25Okapi([_bm25_tokens(t) for t in anchor_texts])
+    bm25 = BM25Okapi(bm25_docs)
     return _StageBContext(
         embedder=embedder,
         categories=categories,

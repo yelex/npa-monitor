@@ -43,12 +43,28 @@ class LifeSituation:
 
 
 @dataclasses.dataclass(frozen=True)
+class HybridAnchor:
+    """Один якорь Stage B в двух представлениях, `parser/hybrid_classifier.py`.
+
+    `text` — полная фраза, идёт в косинус (эмбеддинг) как есть. `bm25_anchor` —
+    опциональная отличительная часть той же фразы для BM25-слоя (например
+    «ветеран боевых действий» вместо «меры социальной поддержки ветеранов боевых
+    действий» — общие слова «меры социальной поддержки» есть почти в каждом якоре и
+    почти любом заголовке о соцподдержке, BM25 на них не должен решать). `None` —
+    для BM25 используется `text` с автоматической обрезкой общих токенов
+    (`parser/hybrid_classifier.py::_bm25_tokens`)."""
+
+    text: str
+    bm25_anchor: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class HybridAnchorSet:
     """Якорные фразы Stage B на одну ЖС, `data/hybrid_anchors.yaml` —
     `parser/hybrid_classifier.py`, docs/SPEC_hybrid_classifier.md."""
 
     category: SignalCategory
-    anchors: tuple[str, ...]
+    anchors: tuple[HybridAnchor, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,7 +113,12 @@ def load_life_situations(path: Path | None = None) -> tuple[LifeSituation, ...]:
 
 def load_hybrid_anchors(path: Path | None = None) -> tuple[HybridAnchorSet, ...]:
     """Якоря Stage B (`parser/hybrid_classifier.py`) — та же валидация id против
-    `db.enums.SignalCategory`, что и `load_life_situations`, по тем же причинам."""
+    `db.enums.SignalCategory`, что и `load_life_situations`, по тем же причинам.
+
+    Каждый элемент `anchors` — либо просто строка (полный текст, `bm25_anchor` не
+    задан — BM25-слой обрежет общие токены автоматически), либо словарь
+    `{text: ..., bm25_anchor: ...}` для явного отличительного варианта (см.
+    `HybridAnchor`)."""
     raw = _load_yaml(path or DATA_DIR / "hybrid_anchors.yaml") or []
     result: list[HybridAnchorSet] = []
     for item in raw:
@@ -108,7 +129,11 @@ def load_hybrid_anchors(path: Path | None = None) -> tuple[HybridAnchorSet, ...]
                 f"hybrid_anchors.yaml: id={item['id']!r} не соответствует "
                 f"db.enums.SignalCategory — добавь значение в enum или исправь id"
             ) from exc
-        result.append(HybridAnchorSet(category=category, anchors=tuple(item["anchors"])))
+        anchors = tuple(
+            HybridAnchor(text=a) if isinstance(a, str) else HybridAnchor(text=a["text"], bm25_anchor=a.get("bm25_anchor"))
+            for a in item["anchors"]
+        )
+        result.append(HybridAnchorSet(category=category, anchors=anchors))
     return tuple(result)
 
 
