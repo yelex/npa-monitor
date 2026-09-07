@@ -137,6 +137,9 @@ class ResultEditFlow(StatesGroup):
 # --- Auth --------------------------------------------------------------------
 
 
+_ADMIN_NOTIFY_TASKS: set[asyncio.Task[None]] = set()  # ссылки на фоновые уведомления админу
+
+
 def is_allowed(user_id: int) -> bool:
     return user_id in get_settings().allowed_user_ids
 
@@ -147,7 +150,11 @@ async def _notify_admin_of_transition(
     """Уведомляет админа (ADMIN_TELEGRAM_USER_ID) о действии эксперта со сигналом —
     взял в работу / отклонил / передал агенту. Свои собственные действия админу
     не пересылаются. Ошибка отправки не должна ломать основной флоу эксперта —
-    логируем и продолжаем."""
+    логируем и продолжаем.
+
+    Вызывать через `_schedule_admin_notification` — fire-and-forget, чтобы
+    медленный Telegram API не тормозил ответ эксперту и не держал сессию БД
+    (ревью claude 07.09)."""
     admin_id = get_settings().admin_telegram_user_id
     if not admin_id or admin_id == actor_id:
         return
@@ -155,6 +162,17 @@ async def _notify_admin_of_transition(
         await bot.send_message(admin_id, text, disable_web_page_preview=True)
     except Exception:  # noqa: BLE001
         log.exception("не удалось уведомить админа о действии с сигналом %s", sig_id)
+
+
+def _schedule_admin_notification(
+    bot: Bot, actor_id: int, sig_id: int, text: str
+) -> None:
+    """Fire-and-forget обёртка: ставит `_notify_admin_of_transition` в фон и не
+    даёт «отвалиться» задаче без наблюдения (create_task без ссылки собирается
+    GC — держим ссылку до завершения, паттерн из asyncio-доков)."""
+    task = asyncio.create_task(_notify_admin_of_transition(bot, actor_id, sig_id, text))
+    _ADMIN_NOTIFY_TASKS.add(task)
+    task.add_done_callback(_ADMIN_NOTIFY_TASKS.discard)
 
 
 # --- Rendering ---------------------------------------------------------------
@@ -761,7 +779,7 @@ async def on_signal_button(cb: CallbackQuery, state: FSMContext) -> None:
                 return
             db.commit()
             log.info("сигнал %s -> В работе (user=%s)", sig_id, cb.from_user.id)
-            await _notify_admin_of_transition(
+            _schedule_admin_notification(
                 cb.bot, cb.from_user.id, sig_id,
                 f"👷 Сигнал {sig_id} взят в работу пользователем {cb.from_user.id}: "
                 f"{html.escape((s.title or '')[:60], quote=False)}",
@@ -821,7 +839,7 @@ async def on_reject_reason(cb: CallbackQuery, state: FSMContext) -> None:
                 return
             db.commit()
             log.info("сигнал %s -> Отклонён: %s (user=%s)", sig_id, reason.value, cb.from_user.id)
-            await _notify_admin_of_transition(
+            _schedule_admin_notification(
                 cb.bot, cb.from_user.id, sig_id,
                 f"❌ Сигнал {sig_id} отклонён пользователем {cb.from_user.id} "
                 f"({REJECT_REASONS[code]}): {html.escape((s.title or '')[:60], quote=False)}",
@@ -1058,7 +1076,7 @@ async def _finish_npa_flow(
 
         db.commit()
         log.info("передано агенту автообновления: signal=%s link=%s", sig_id, s.npa_link)
-        await _notify_admin_of_transition(
+        _schedule_admin_notification(
             target.bot, changed_by, sig_id,
             f"📤 Сигнал {sig_id} передан агенту пользователем {changed_by}: "
             f"{html.escape((s.title or '')[:60], quote=False)}\n"
