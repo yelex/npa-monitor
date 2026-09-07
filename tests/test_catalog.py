@@ -66,7 +66,7 @@ def test_access_for_domain_returns_access_by_exact_or_subdomain_match() -> None:
     assert access_for_domain("sfr.gov.ru") == "direct"
     assert access_for_domain("www.sfr.gov.ru") == "direct"  # поддомен
     assert access_for_domain("kremlin.ru") == "ru_proxy"
-    assert access_for_domain("docs.cntd.ru") == "unsupported"
+    assert access_for_domain("docs.cntd.ru") == "ru_proxy"
 
 
 def test_access_for_domain_returns_none_for_unknown_domain() -> None:
