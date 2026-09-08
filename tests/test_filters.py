@@ -71,6 +71,18 @@ def test_is_excluded_path_matches_pravo_gov_documents_listing() -> None:
     assert is_excluded_path("http://publication.pravo.gov.ru/Documents/search?periodType=day&date=01.09.2026") is False
 
 
+def test_is_excluded_path_matches_mos_ru_district_subdomains() -> None:
+    """Районные поддомены mos.ru — растиражированные районные новости/справочники
+    из выдачи Yandex Search (инциденты #61-#331, 08.09); www.mos.ru остаётся
+    (официальные документы — адаптер mos.ru/authority/documents)."""
+    assert is_excluded_path("https://novogireevo.mos.ru/social-services/fiu/detail/13855901.html") is True
+    assert is_excluded_path("https://sao.mos.ru/presscenter/news/detail/13847811.html") is True
+    assert is_excluded_path("https://gp36.mos.ru/global_ruffe_tech/docs/363prf2019.doc") is True
+    # www и apex mos.ru — в обработке
+    assert is_excluded_path("https://www.mos.ru/news/item/174482073/") is False
+    assert is_excluded_path("https://mos.ru/authority/documents/") is False
+
+
 def test_is_excluded_path_does_not_match_regular_news() -> None:
     assert is_excluded_path("https://sfr.gov.ru/press_center/news/~2026/08/19/284025") is False
     assert is_excluded_path("https://kremlin.ru/acts/news/80518") is False
