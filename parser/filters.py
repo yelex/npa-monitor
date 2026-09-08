@@ -21,6 +21,13 @@ _EXCLUDED_URL_PATTERNS = (
     # России», <регион>/<издание>-ru/<id>), не источник публикаций о событии —
     # docs/SPEC_vrf_tass_aggregator_filter.md.
     re.compile(r"^https?://(?:www\.)?vrf\.tass\.ru/"),
+    # publication.pravo.gov.ru/documents?block=region<NN>&... — ЛИСТИНГ публикаций
+    # за день по региону, не конкретный документ. Сам адаптер pravo_gov ходит в
+    # /Documents/search и создаёт Publication на каждый документ (URL вида
+    # /document/<id>); страницы-листинги появляются только из выдачи Yandex Search
+    # (discovery) и превращаются в сигнал-мусор «Официальное опубликование правовых
+    # актов» (инциденты #114/#235/#332, 08.09).
+    re.compile(r"^https?://publication\.pravo\.gov\.ru/documents(?:\?|$)"),
 )
 
 

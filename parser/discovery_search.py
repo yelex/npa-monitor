@@ -79,7 +79,7 @@ from db.service import register_document_seen
 from db.session import init_db, make_engine, make_session_factory
 from parser.classifier import Classifier
 from parser.fetcher import SourceUnavailable, fetch
-from parser.filters import is_domain_whitelisted
+from parser.filters import is_domain_whitelisted, is_excluded_path
 from parser.models import Publication
 from parser.signals import build_signal, is_review_aggregate
 from parser.state import fetch_window_start, mark_source_processed
@@ -271,6 +271,7 @@ class DiscoverySearchResult:
     duplicates: int = 0
     irrelevant: int = 0
     reviews: int = 0  # docs/SPEC_review_filter_discovery.md: обзоры/агрегаторы, сигнал не создаётся
+    filtered: int = 0  # is_excluded_path: статичные/листинговые страницы из выдачи Яндекса (08.09)
     new_signals: int = 0  # в dry-run — сколько сигналов было бы создано, без записи в БД
 
 
@@ -321,6 +322,15 @@ def run_discovery_search(
                 # встречалось (SPEC раздел 4а), но фильтр по URL по разделу 13 AGENTS.md
                 # обязателен независимо от того, что уже отфильтровал сам запрос.
                 log.debug("  домен не в белом списке — пропуск")
+                continue
+
+            if is_excluded_path(pub.url):
+                # Тот же pre-filter, что и в `parser/orchestrator.py::
+                # _process_publication`: страницы-листинги/справочники из выдачи
+                # Яндекса не должны создавать сигнал (инциденты #114/#235/#332,
+                # 08.09 — листинги pravo.gov.ru/documents?block=region*).
+                log.debug("  известная статичная/листинговая страница — пропуск")
+                result.filtered += 1
                 continue
 
             if not dry_run:

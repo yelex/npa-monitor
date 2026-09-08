@@ -61,6 +61,16 @@ def test_is_excluded_path_matches_vrf_tass_aggregator() -> None:
     assert is_excluded_path("https://tass.ru/obschestvo/28050531") is False
 
 
+def test_is_excluded_path_matches_pravo_gov_documents_listing() -> None:
+    """Листинги pravo.gov.ru/documents?block=region* из выдачи Yandex Search — не
+    конкретный документ, сигнал-мусор (инциденты #114/#235/#332, 08.09)."""
+    assert is_excluded_path("http://publication.pravo.gov.ru/documents?block=region74&periodType=day&date=03.09.2026") is True
+    assert is_excluded_path("http://publication.pravo.gov.ru/documents") is True
+    # конкретные документы и AJAX-эндпоинт адаптера — остаются в обработке
+    assert is_excluded_path("http://publication.pravo.gov.ru/document/4100202608240009") is False
+    assert is_excluded_path("http://publication.pravo.gov.ru/Documents/search?periodType=day&date=01.09.2026") is False
+
+
 def test_is_excluded_path_does_not_match_regular_news() -> None:
     assert is_excluded_path("https://sfr.gov.ru/press_center/news/~2026/08/19/284025") is False
     assert is_excluded_path("https://kremlin.ru/acts/news/80518") is False
