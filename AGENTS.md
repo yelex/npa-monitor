@@ -425,6 +425,11 @@ webhook) пока нет — подробности и открытый выбо
    http зарезервирован на будущее, не реализован. Реализовано —
    `bot/autoupdate_client.py::AutoUpdateAgentClient` (spool),
    `bot/main.py::_finish_npa_flow`/`_reconcile_spool_tasks`/`_results_scan_loop`.
+   **Третий сервис (2026-09-24):** ревью-UI аналитика выносится из npa-somas в отдельный
+   репозиторий `npa-review` (`npa-somas/docs/specs/SPEC_review_service_split.md`). На том
+   же volume `npa_data` он забирает карточки из `review_inbox/` (пишет коннектор) и
+   остаётся **единственным писателем** KB `kb/benefits_knowledge_base.json`; бот и
+   коннектор KB только читают. Код бота и его контракты (спул, чтение KB) не меняются.
 9. 🟢 Пример использования GLM и креды — найдены в `/Users/user/dev/auto`:
    `GLM_PERSONAL_API_KEY`/`GLM_PERSONAL_BASE_URL`/`GLM_PERSONAL_MODEL` в
    `/Users/user/dev/auto/.env`, паттерн вызова —
